@@ -1,0 +1,302 @@
+// Direct implementation using fetch API
+// Use environment variable if available, otherwise use a placeholder
+// Note: The placeholder won't actually work - users will need to set up their own API key
+const API_KEY = process.env.REACT_APP_GOOGLE_GEMINI_API_KEY || "DEMO_KEY_REPLACE_WITH_ACTUAL_KEY";
+// Using the latest API endpoint with the current model name
+const API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
+const VISION_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
+
+export const getGeminiResponse = async (query) => {
+  try {
+    if (!API_KEY || API_KEY === "DEMO_KEY_REPLACE_WITH_ACTUAL_KEY") {
+      // Return a mock response instead of throwing an error
+      console.warn('Using demo mode: Gemini API key is not configured');
+      return "I'm running in demo mode because the Gemini API key is not configured. Please set up your API key in the environment variables to enable full functionality. For now, I can only provide this placeholder response.";
+    }
+
+    console.log('Sending request to Gemini API with query:', query);
+
+    // Add a pre-prompt to make Gemini respond like a study advisor
+    const prePrompt = `You are ScholarAI's Study Companion, a supportive and knowledgeable study advisor. 
+    Your role is to help students learn effectively, manage their study time, and maintain their well-being.
+    
+    Please follow these guidelines in all your responses:
+    1. Use a warm, encouraging, and conversational tone as if you're speaking directly to the student
+    2. Provide practical, actionable advice that students can immediately apply
+    3. Be empathetic and understanding of the challenges students face
+    4. Format your responses as plain text only - do not use markdown formatting like **bold**, *italics*, or code blocks
+    5. Break complex concepts into simple, digestible explanations
+    6. Offer specific study techniques, time management strategies, and well-being practices
+    7. Personalize your advice based on the student's specific situation
+    8. Be concise but thorough in your explanations
+    9. IMPORTANT: For very short or one-word queries, provide a brief, direct response without elaborating too much. 
+    10. IMPORTANT: If you receive the same query multiple times, provide the exact same response
+    
+    Now, please respond to the following query from the student:
+    `;
+
+    const fullQuery = prePrompt + query;
+
+    const response = await fetch(`${API_URL}?key=${API_KEY}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                text: fullQuery
+              }
+            ]
+          }
+        ],
+        generationConfig: {
+          temperature: 0.1, // Lower temperature for more consistent responses
+          maxOutputTokens: 2048,
+        }
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.text();
+      console.error('Gemini API error:', response.status, errorData);
+      throw new Error(`Gemini API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    
+    if (!data.candidates || data.candidates.length === 0 || !data.candidates[0].content) {
+      throw new Error('No response from Gemini API');
+    }
+
+    const textResponse = data.candidates[0].content.parts[0].text;
+    return textResponse;
+  } catch (error) {
+    console.error('Error getting Gemini response:', error);
+    return `I'm having trouble connecting to my knowledge base right now. This could be due to a network issue or service limitations. Please try again in a moment, or contact support if the problem persists.`;
+  }
+};
+
+// Function to generate a study plan
+export const generateStudyPlan = async (content, preferences) => {
+  try {
+    if (!API_KEY || API_KEY === "DEMO_KEY_REPLACE_WITH_ACTUAL_KEY") {
+      // Return a mock study plan
+      return {
+        overview: "This is a demo study plan. To generate real study plans, please configure your Gemini API key in the environment variables.",
+        days: [
+          {
+            day: 1,
+            date: "Demo Day 1",
+            sessions: [
+              {
+                title: "Demo Session 1",
+                duration: 30,
+                type: "Reading",
+                topics: ["Demo Topic 1", "Demo Topic 2"],
+                description: "This is a demo session description."
+              }
+            ]
+          }
+        ],
+        tips: ["This is a demo study tip."]
+      };
+    }
+
+    const prompt = `
+    You are an expert study plan generator. Create a personalized study plan based on the following content and preferences.
+    
+    CONTENT TO STUDY:
+    ${content}
+    
+    PREFERENCES:
+    - Difficulty level (1-10): ${preferences.difficulty}
+    - Available study time per day (minutes): ${preferences.timeAvailable}
+    - Days to complete: ${preferences.daysToComplete}
+    - Learning style: ${preferences.learningStyle}
+    
+    Create a comprehensive study plan with the following structure:
+    1. A brief overview paragraph summarizing the study approach
+    2. A day-by-day breakdown, where each day has:
+       - A day number and date
+       - 1-3 study sessions per day, each with:
+         - A descriptive title
+         - Duration in minutes
+         - Type (Reading, Practice, Review, Quiz, etc.)
+         - Topics covered
+         - A brief description of what to do
+    3. A list of 3-5 study tips specific to this content
+    
+    Format your response as a JSON object with the following structure:
+    {
+      "overview": "string",
+      "days": [
+        {
+          "day": number,
+          "date": "string",
+          "sessions": [
+            {
+              "title": "string",
+              "duration": number,
+              "type": "string",
+              "topics": ["string"],
+              "description": "string"
+            }
+          ]
+        }
+      ],
+      "tips": ["string"]
+    }
+    
+    IMPORTANT: Make sure your response is ONLY the JSON object, with no additional text before or after.
+    `;
+
+    const response = await fetch(`${API_URL}?key=${API_KEY}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                text: prompt
+              }
+            ]
+          }
+        ],
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 4096,
+        }
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Gemini API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    
+    if (!data.candidates || data.candidates.length === 0 || !data.candidates[0].content) {
+      throw new Error('No response from Gemini API');
+    }
+
+    const textResponse = data.candidates[0].content.parts[0].text;
+    
+    // Parse the JSON response
+    try {
+      // Clean up the response to handle potential formatting issues
+      const cleanedResponse = textResponse.replace(/```json|```/g, '').trim();
+      const studyPlan = JSON.parse(cleanedResponse);
+      return studyPlan;
+    } catch (parseError) {
+      console.error('Error parsing study plan JSON:', parseError);
+      throw new Error('Failed to parse study plan response');
+    }
+  } catch (error) {
+    console.error('Error generating study plan:', error);
+    throw error;
+  }
+};
+
+// Function to generate a PDF study plan
+export const generatePDFStudyPlan = async (content, preferences) => {
+  // For PDF content, we use the same function but with a slightly modified approach
+  return generateStudyPlan(content, preferences);
+};
+
+// Function to generate quiz questions
+export const generateQuizQuestions = async (content, numQuestions = 5) => {
+  try {
+    if (!API_KEY || API_KEY === "DEMO_KEY_REPLACE_WITH_ACTUAL_KEY") {
+      // Return mock quiz questions
+      return [
+        {
+          question: "This is a demo question?",
+          options: ["Option A", "Option B", "Option C", "Option D"],
+          correctAnswer: 0,
+          explanation: "This is a demo explanation."
+        }
+      ];
+    }
+
+    const prompt = `
+    Generate a quiz with ${numQuestions} multiple-choice questions based on the following content:
+    
+    ${content}
+    
+    For each question:
+    1. Create a clear, concise question
+    2. Provide 4 possible answers (one correct, three incorrect)
+    3. Indicate which answer is correct (0-indexed)
+    4. Include a brief explanation of why the correct answer is right
+    
+    Format your response as a JSON array with the following structure:
+    [
+      {
+        "question": "string",
+        "options": ["string", "string", "string", "string"],
+        "correctAnswer": number,
+        "explanation": "string"
+      }
+    ]
+    
+    IMPORTANT: Make sure your response is ONLY the JSON array, with no additional text before or after.
+    `;
+
+    const response = await fetch(`${API_URL}?key=${API_KEY}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                text: prompt
+              }
+            ]
+          }
+        ],
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 4096,
+        }
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Gemini API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    
+    if (!data.candidates || data.candidates.length === 0 || !data.candidates[0].content) {
+      throw new Error('No response from Gemini API');
+    }
+
+    const textResponse = data.candidates[0].content.parts[0].text;
+    
+    // Parse the JSON response
+    try {
+      // Clean up the response to handle potential formatting issues
+      const cleanedResponse = textResponse.replace(/```json|```/g, '').trim();
+      const quizQuestions = JSON.parse(cleanedResponse);
+      return quizQuestions;
+    } catch (parseError) {
+      console.error('Error parsing quiz questions JSON:', parseError);
+      throw new Error('Failed to parse quiz questions response');
+    }
+  } catch (error) {
+    console.error('Error generating quiz questions:', error);
+    throw error;
+  }
+};

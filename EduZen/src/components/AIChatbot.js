@@ -1,0 +1,753 @@
+import React, { useState, useEffect, useRef, useCallback, memo, lazy, Suspense } from 'react';
+import {
+  Typography,
+  Paper,
+  TextField,
+  Box,
+  Card,
+  IconButton,
+  List,
+  ListItem,
+  Avatar,
+  Tooltip,
+  Divider,
+  CircularProgress,
+  Chip,
+  Button,
+  ButtonGroup,
+  Badge,
+  CardContent,
+  useTheme,
+  Menu,
+  MenuItem,
+  ListItemText,
+  ListItemIcon
+} from '@mui/material';
+import SendIcon from '@mui/icons-material/Send';
+import SmartToyIcon from '@mui/icons-material/SmartToy';
+import PersonIcon from '@mui/icons-material/Person';
+import SentimentSatisfiedAltIcon from '@mui/icons-material/SentimentSatisfiedAlt';
+import SentimentVeryDissatisfiedIcon from '@mui/icons-material/SentimentVeryDissatisfied';
+import SentimentDissatisfiedIcon from '@mui/icons-material/SentimentDissatisfied';
+import MoodIcon from '@mui/icons-material/Mood';
+import MicIcon from '@mui/icons-material/Mic';
+import MicOffIcon from '@mui/icons-material/MicOff';
+import StopIcon from '@mui/icons-material/Stop';
+import { v4 as uuidv4 } from 'uuid';
+import { getGeminiResponse } from '../services/gemini';
+import { getCurrentUser } from '../services/auth';
+import SpeechRecognitionService from '../services/speechRecognition';
+
+// Lazy load breathing exercise component
+const BreathingExercise = lazy(() => import('./BreathingExercise'));
+
+// Define keyframes for the pulse animation
+const pulseAnimation = {
+  '@keyframes pulse': {
+    '0%': {
+      boxShadow: '0 0 0 0 rgba(255,255,255, 0.7)'
+    },
+    '70%': {
+      boxShadow: '0 0 0 6px rgba(255,255,255, 0)'
+    },
+    '100%': {
+      boxShadow: '0 0 0 0 rgba(255,255,255, 0)'
+    }
+  }
+};
+
+const AIChatbot = ({ initialPrompt }) => {
+  const theme = useTheme();
+  const [currentUser, setCurrentUser] = useState(null);
+  const [message, setMessage] = useState('');
+  const [chatHistory, setChatHistory] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const chatEndRef = useRef(null);
+  const chatContainerRef = useRef(null);
+
+  // Breathing exercise states
+  const [showBreathingPrompt, setShowBreathingPrompt] = useState(false);
+  const [showBreathingExercise, setShowBreathingExercise] = useState(false);
+
+  // Brown noise states
+  const [showBrownNoisePrompt, setShowBrownNoisePrompt] = useState(false);
+  const [showBrownNoisePlayer, setShowBrownNoisePlayer] = useState(false);
+
+  // Emotion detection state
+  const [detectedEmotion, setDetectedEmotion] = useState(null);
+
+  // Voice input states
+  const [isListening, setIsListening] = useState(false);
+  const speechRecognitionRef = useRef(null);
+  const [speechSupported, setSpeechSupported] = useState(false);
+  const [partialTranscript, setPartialTranscript] = useState('');
+
+  // Jarvis-like response tracking states
+  const [fileSummarized, setFileSummarized] = useState(false);
+  const [fileUploaded, setFileUploaded] = useState(false);
+  const [planCompleted, setPlanCompleted] = useState(false);
+
+  // Initialize speech services on component mount
+  useEffect(() => {
+    // Initialize speech recognition service
+    const speechRecognition = new SpeechRecognitionService();
+    speechRecognitionRef.current = speechRecognition;
+    
+    // If initialPrompt is provided, add it as a system message
+    if (initialPrompt) {
+      const systemMessage = {
+        id: uuidv4(),
+        sender: 'ai',
+        text: initialPrompt,
+        timestamp: new Date().toISOString()
+      };
+      setChatHistory([systemMessage]);
+    }
+
+    // Check if speech recognition is supported
+    setSpeechSupported(speechRecognition.isSupported);
+
+    // Set up event handlers for speech recognition
+    if (speechRecognition.isSupported) {
+      // Handle interim results (partial speech)
+      speechRecognition.onResult = (transcript, isFinal) => {
+        setPartialTranscript(transcript);
+      };
+
+      // Handle final speech after silence is detected
+      speechRecognition.onSilenceEnd = (finalTranscript) => {
+        setPartialTranscript('');
+        setMessage(finalTranscript);
+        setIsListening(false);
+        
+        // If we have a final transcript, send it as a message
+        if (finalTranscript.trim()) {
+          handleSendMessage(finalTranscript);
+        }
+      };
+    }
+
+    // Clean up on component unmount
+    return () => {
+      if (speechRecognitionRef.current) {
+        speechRecognitionRef.current.stop();
+      }
+    };
+  }, [initialPrompt]);
+
+  // Get current user on component mount
+  useEffect(() => {
+    const fetchUser = async () => {
+      try {
+        const user = await getCurrentUser();
+        setCurrentUser(user);
+        console.log('Current user:', user);
+        
+        // Create welcome message
+        const welcomeMessage = {
+          id: uuidv4(),
+          sender: 'ai',
+          text: `Hello ${user?.displayName || 'there'}! I'm your Well Being Companion. How can I help you today?`,
+          timestamp: new Date().toISOString()
+        };
+
+        setChatHistory([welcomeMessage]);
+      } catch (error) {
+        console.error('Error fetching user:', error);
+      }
+    };
+
+    if (!initialPrompt) {
+      fetchUser();
+    }
+  }, [initialPrompt]);
+
+  // Scroll to bottom when chat history changes
+  useEffect(() => {
+    scrollToBottom();
+  }, [chatHistory]);
+
+  // Scroll to bottom of chat
+  const scrollToBottom = useCallback(() => {
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, []);
+
+  // Handle sending a message
+  const handleSendMessage = async (messageText = message) => {
+    if (!messageText.trim()) return;
+
+    // Add user message to chat
+    const userMessage = {
+      id: uuidv4(),
+      sender: 'user',
+      text: messageText,
+      timestamp: new Date().toISOString()
+    };
+
+    setChatHistory(prev => [...prev, userMessage]);
+    setMessage('');
+    setLoading(true);
+    setError(null);
+
+    try {
+      // Get response from Gemini
+      const response = await getGeminiResponse(
+        messageText,
+        chatHistory.map(msg => ({
+          role: msg.sender === 'user' ? 'user' : 'model',
+          parts: [{ text: msg.text }]
+        }))
+      );
+
+      // Add AI response to chat
+      const aiMessage = {
+        id: uuidv4(),
+        sender: 'ai',
+        text: response,
+        timestamp: new Date().toISOString()
+      };
+
+      setChatHistory(prev => [...prev, aiMessage]);
+
+      // Check for special commands in the response
+      checkForSpecialCommands(response);
+
+      // Scroll to bottom
+      setTimeout(() => {
+        scrollToBottom();
+      }, 100);
+    } catch (error) {
+      console.error('Error getting response:', error);
+      setError('Failed to get response. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Format text by removing markdown formatting
+  const formatText = useCallback((text) => {
+    if (!text) return '';
+
+    // Remove bold formatting
+    let formattedText = text.replace(/\*\*(.*?)\*\*/g, '$1');
+    
+    // Remove italic formatting
+    formattedText = formattedText.replace(/\*(.*?)\*/g, '$1');
+    
+    // Remove code blocks
+    formattedText = formattedText.replace(/```(.*?)```/gs, '$1');
+    
+    return formattedText;
+  }, []);
+
+  // Check for special commands in the AI response
+  const checkForSpecialCommands = useCallback((response) => {
+    const lowerResponse = response.toLowerCase();
+    
+    // Check for breathing exercise suggestion
+    if (
+      (lowerResponse.includes('breathing exercise') || 
+       lowerResponse.includes('deep breath') || 
+       lowerResponse.includes('breathe deeply')) && 
+      !showBreathingPrompt && 
+      !showBreathingExercise
+    ) {
+      setShowBreathingPrompt(true);
+    }
+    
+    // Check for brown noise suggestion
+    if (
+      (lowerResponse.includes('brown noise') || 
+       lowerResponse.includes('background noise') || 
+       lowerResponse.includes('ambient sound') ||
+       lowerResponse.includes('focus sound')) && 
+      !showBrownNoisePrompt && 
+      !showBrownNoisePlayer
+    ) {
+      setShowBrownNoisePrompt(true);
+    }
+    
+    // Detect emotion in the response
+    if (lowerResponse.includes('stress') || lowerResponse.includes('anxious') || lowerResponse.includes('worried')) {
+      setDetectedEmotion('stressed');
+    } else if (lowerResponse.includes('sad') || lowerResponse.includes('depressed') || lowerResponse.includes('unhappy')) {
+      setDetectedEmotion('sad');
+    } else if (lowerResponse.includes('happy') || lowerResponse.includes('excited') || lowerResponse.includes('great')) {
+      setDetectedEmotion('happy');
+    }
+    
+    // Track Jarvis-like responses
+    if (lowerResponse.includes('summarized your file') || lowerResponse.includes('here\'s a summary')) {
+      setFileSummarized(true);
+    }
+    
+    if (lowerResponse.includes('uploaded your file') || lowerResponse.includes('file has been uploaded')) {
+      setFileUploaded(true);
+    }
+    
+    if (lowerResponse.includes('completed your study plan') || lowerResponse.includes('here\'s your study plan')) {
+      setPlanCompleted(true);
+    }
+  }, [showBreathingPrompt, showBreathingExercise, showBrownNoisePrompt, showBrownNoisePlayer]);
+
+  // Handle message input change
+  const handleMessageChange = useCallback((e) => {
+    const newValue = e.target.value;
+    setMessage(newValue);
+  }, []);
+
+  // Toggle speech recognition
+  const toggleListening = useCallback(() => {
+    if (!speechRecognitionRef.current) return;
+    
+    if (isListening) {
+      speechRecognitionRef.current.stop();
+      setIsListening(false);
+      setPartialTranscript('');
+    } else {
+      speechRecognitionRef.current.start();
+      setIsListening(true);
+    }
+  }, [isListening]);
+
+  // Handle breathing exercise acceptance
+  const handleBreathingExerciseAccept = useCallback(() => {
+    setShowBreathingPrompt(false);
+    setShowBreathingExercise(true);
+  }, []);
+
+  // Handle breathing exercise decline
+  const handleBreathingExerciseDecline = useCallback(() => {
+    setShowBreathingPrompt(false);
+    
+    // Add a message to the chat
+    const aiMessage = {
+      id: uuidv4(),
+      sender: 'ai',
+      text: "No problem. Let me know if you change your mind or if there's anything else I can help with.",
+      timestamp: new Date().toISOString()
+    };
+    
+    setChatHistory(prev => [...prev, aiMessage]);
+  }, []);
+
+  // Handle breathing exercise completion
+  const handleBreathingExerciseComplete = useCallback(() => {
+    setShowBreathingExercise(false);
+    
+    // Add a message to the chat
+    const aiMessage = {
+      id: uuidv4(),
+      sender: 'ai',
+      text: "Great job with the breathing exercise! How are you feeling now?",
+      timestamp: new Date().toISOString()
+    };
+    
+    setChatHistory(prev => [...prev, aiMessage]);
+  }, []);
+
+  // Format timestamp to readable format
+  const formatTimestamp = useCallback((timestamp) => {
+    const date = new Date(timestamp);
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }, []);
+
+  // Render the emotion icon based on detected emotion
+  const renderEmotionIcon = useCallback(() => {
+    switch (detectedEmotion) {
+      case 'happy':
+        return <MoodIcon color="success" />;
+      case 'sad':
+        return <SentimentDissatisfiedIcon color="info" />;
+      case 'stressed':
+        return <SentimentVeryDissatisfiedIcon color="error" />;
+      default:
+        return <SentimentSatisfiedAltIcon color="disabled" />;
+    }
+  }, [detectedEmotion]);
+
+  return (
+    <Paper
+      elevation={3}
+      sx={{
+        display: 'flex',
+        flexDirection: 'column',
+        height: '100%',
+        maxHeight: '80vh',
+        overflow: 'hidden'
+      }}
+    >
+      <Box
+        sx={{
+          p: 2,
+          bgcolor: 'primary.main',
+          color: 'white',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'flex-start'
+        }}
+      >
+        <Box display="flex" alignItems="center">
+          {/* Empty box to maintain layout */}
+        </Box>
+
+        <Box display="flex" alignItems="center">
+          <Typography variant="h6" sx={{ fontWeight: 'medium', mr: 1 }}>
+            Well Being Companion
+          </Typography>
+          <Tooltip title={`Detected mood: ${detectedEmotion || 'neutral'}`}>
+            <Box sx={{ 
+              ml: 1, 
+              display: 'flex', 
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: 32, 
+              height: 32, 
+              borderRadius: '50%', 
+              bgcolor: 'rgba(255,255,255,0.2)',
+              boxShadow: '0 0 8px rgba(255,255,255,0.5)',
+              animation: 'pulse 2s infinite',
+              ...pulseAnimation
+            }}>
+              {React.cloneElement(renderEmotionIcon(), { fontSize: 'medium' })}
+            </Box>
+          </Tooltip>
+        </Box>
+      </Box>
+
+      {/* Chat messages */}
+      <Box
+        ref={chatContainerRef}
+        sx={{
+          flex: 1,
+          overflow: 'auto',
+          p: 2,
+          bgcolor: 'background.default'
+        }}
+      >
+        <List>
+          {chatHistory.map((chat) => {
+            const isAI = chat.sender === 'ai';
+            
+            return (
+              <ListItem
+                key={chat.id}
+                sx={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: isAI ? 'flex-start' : 'flex-end',
+                  padding: 1,
+                  mb: 2
+                }}
+              >
+                <Box
+                  sx={{
+                    display: 'flex',
+                    flexDirection: 'row',
+                    alignItems: 'flex-start',
+                    maxWidth: '80%'
+                  }}
+                >
+                  {isAI && (
+                    <Avatar
+                      sx={{
+                        bgcolor: 'primary.main',
+                        width: 32,
+                        height: 32,
+                        mr: 1
+                      }}
+                    >
+                      <SmartToyIcon fontSize="small" />
+                    </Avatar>
+                  )}
+                  
+                  <Card
+                    variant="outlined"
+                    sx={{
+                      p: 2,
+                      borderRadius: 2,
+                      bgcolor: isAI ? 'background.default' : 'primary.light',
+                      color: isAI ? 'text.primary' : 'white',
+                      borderLeft: isAI ? '4px solid' : 'none',
+                      borderColor: isAI ? 'primary.main' : 'transparent'
+                    }}
+                  >
+                    <Typography
+                      variant="body1"
+                      sx={{
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word'
+                      }}
+                    >
+                      {chat.text}
+                    </Typography>
+                    
+                    <Typography
+                      variant="caption"
+                      sx={{
+                        display: 'block',
+                        mt: 1,
+                        textAlign: isAI ? 'left' : 'right',
+                        color: isAI ? 'text.secondary' : 'rgba(255,255,255,0.7)'
+                      }}
+                    >
+                      {formatTimestamp(chat.timestamp)}
+                    </Typography>
+                  </Card>
+                  
+                  {!isAI && (
+                    <Avatar
+                      sx={{
+                        bgcolor: 'secondary.main',
+                        width: 32,
+                        height: 32,
+                        ml: 1
+                      }}
+                    >
+                      <PersonIcon fontSize="small" />
+                    </Avatar>
+                  )}
+                </Box>
+              </ListItem>
+            );
+          })}
+          
+          {/* Breathing exercise prompt - integrated into chat flow */}
+          {showBreathingPrompt && (
+            <ListItem 
+              sx={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'flex-start',
+                padding: 1,
+                mb: 2
+              }}
+            >
+              <Box 
+                sx={{ 
+                  display: 'flex',
+                  flexDirection: 'row',
+                  alignItems: 'flex-start',
+                  maxWidth: '80%'
+                }}
+              >
+                <Avatar 
+                  sx={{ 
+                    bgcolor: 'primary.main',
+                    width: 32,
+                    height: 32,
+                    mr: 1
+                  }}
+                >
+                  <SmartToyIcon fontSize="small" />
+                </Avatar>
+                
+                <Card 
+                  variant="outlined" 
+                  sx={{ 
+                    p: 2,
+                    borderRadius: 2,
+                    bgcolor: 'background.default',
+                    borderLeft: '4px solid',
+                    borderColor: 'primary.main'
+                  }}
+                >
+                  <Typography variant="subtitle1" fontWeight="medium" gutterBottom>
+                    Would you like to try a breathing exercise?
+                  </Typography>
+                  <Typography variant="body2" sx={{ mb: 2 }}>
+                    Taking a few minutes for deep breathing can help reduce stress and improve focus.
+                  </Typography>
+                  <Box sx={{ display: 'flex', gap: 1 }}>
+                    <Button 
+                      variant="contained" 
+                      size="small" 
+                      onClick={handleBreathingExerciseAccept}
+                    >
+                      Yes, let's try
+                    </Button>
+                    <Button 
+                      variant="outlined" 
+                      size="small" 
+                      onClick={handleBreathingExerciseDecline}
+                    >
+                      No, thanks
+                    </Button>
+                  </Box>
+                </Card>
+              </Box>
+            </ListItem>
+          )}
+          
+          {/* Breathing exercise component */}
+          {showBreathingExercise && (
+            <ListItem 
+              sx={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                padding: 1,
+                mb: 2,
+                width: '100%'
+              }}
+            >
+              <Card 
+                variant="outlined" 
+                sx={{ 
+                  p: 2,
+                  borderRadius: 2,
+                  width: '100%',
+                  maxWidth: '500px',
+                  bgcolor: 'background.paper',
+                  boxShadow: 2
+                }}
+              >
+                <Suspense fallback={<CircularProgress />}>
+                  <BreathingExercise onComplete={handleBreathingExerciseComplete} />
+                </Suspense>
+              </Card>
+            </ListItem>
+          )}
+          
+          {/* Loading indicator */}
+          {loading && (
+            <ListItem
+              sx={{
+                display: 'flex',
+                justifyContent: 'flex-start',
+                padding: 1
+              }}
+            >
+              <Box
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  ml: 5
+                }}
+              >
+                <CircularProgress size={20} />
+                <Typography variant="body2" sx={{ ml: 1, color: 'text.secondary' }}>
+                  Thinking...
+                </Typography>
+              </Box>
+            </ListItem>
+          )}
+          
+          {/* Error message */}
+          {error && (
+            <ListItem
+              sx={{
+                display: 'flex',
+                justifyContent: 'center',
+                padding: 1
+              }}
+            >
+              <Chip
+                label={error}
+                color="error"
+                variant="outlined"
+                onDelete={() => setError(null)}
+              />
+            </ListItem>
+          )}
+          
+          {/* Speech recognition partial transcript */}
+          {isListening && partialTranscript && (
+            <ListItem
+              sx={{
+                display: 'flex',
+                justifyContent: 'flex-end',
+                padding: 1
+              }}
+            >
+              <Box
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  mr: 5
+                }}
+              >
+                <Typography variant="body2" sx={{ mr: 1, color: 'text.secondary', fontStyle: 'italic' }}>
+                  {partialTranscript}
+                </Typography>
+                <CircularProgress size={16} />
+              </Box>
+            </ListItem>
+          )}
+          
+          {/* This div is used to scroll to bottom */}
+          <div ref={chatEndRef} />
+        </List>
+      </Box>
+
+      {/* Message input */}
+      <Box
+        sx={{
+          p: 2,
+          bgcolor: 'background.paper',
+          borderTop: '1px solid',
+          borderColor: 'divider'
+        }}
+      >
+        <Box
+          component="form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            handleSendMessage();
+          }}
+          sx={{
+            display: 'flex',
+            alignItems: 'center'
+          }}
+        >
+          {/* Voice input button */}
+          {speechSupported && (
+            <Tooltip title={isListening ? 'Stop listening' : 'Start voice input'}>
+              <IconButton
+                color={isListening ? 'error' : 'primary'}
+                onClick={toggleListening}
+                disabled={loading}
+              >
+                {isListening ? <MicOffIcon /> : <MicIcon />}
+              </IconButton>
+            </Tooltip>
+          )}
+          
+          <TextField
+            fullWidth
+            variant="outlined"
+            placeholder="Type your message..."
+            value={message}
+            onChange={handleMessageChange}
+            disabled={loading || isListening}
+            size="small"
+            sx={{
+              mx: 1,
+              '& .MuiOutlinedInput-root': {
+                borderRadius: 4
+              }
+            }}
+          />
+          
+          <IconButton
+            color="primary"
+            type="submit"
+            disabled={!message.trim() || loading}
+          >
+            <SendIcon />
+          </IconButton>
+        </Box>
+      </Box>
+    </Paper>
+  );
+};
+
+// Set default props
+AIChatbot.defaultProps = {
+  initialPrompt: null
+};
+
+export default memo(AIChatbot);

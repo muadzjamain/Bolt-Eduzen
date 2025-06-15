@@ -1,0 +1,687 @@
+import React, { useState, useEffect } from 'react';
+import {
+  Box,
+  Typography,
+  Card,
+  CardContent,
+  Grid,
+  Button,
+  IconButton,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  TextField,
+  CircularProgress,
+  LinearProgress,
+  Checkbox,
+  List,
+  ListItem,
+  ListItemText,
+  ListItemIcon,
+  Divider,
+  Alert
+} from '@mui/material';
+import DeleteIcon from '@mui/icons-material/Delete';
+import EditIcon from '@mui/icons-material/Edit';
+import HistoryIcon from '@mui/icons-material/History';
+import CloseIcon from '@mui/icons-material/Close';
+import { format } from 'date-fns';
+import { db, auth } from '../firebase';
+import { collection, query, where, getDocs, doc, deleteDoc, updateDoc, addDoc, onSnapshot } from 'firebase/firestore';
+import { onAuthStateChanged } from 'firebase/auth';
+
+const StudyPlanHistory = ({ refreshTrigger }) => {
+  const [studyPlans, setStudyPlans] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedPlan, setSelectedPlan] = useState(null);
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [newPlanName, setNewPlanName] = useState('');
+  const [planToDelete, setPlanToDelete] = useState(null);
+  const [error, setError] = useState(null);
+
+  // Simple function to safely format dates
+  const formatDate = (timestamp) => {
+    if (!timestamp) return 'No date';
+    
+    try {
+      // Check if it's a Firestore timestamp
+      if (timestamp && typeof timestamp.toDate === 'function') {
+        return format(timestamp.toDate(), 'dd/MM/yyyy');
+      }
+      
+      // Check if it's a JavaScript Date
+      if (timestamp instanceof Date) {
+        return format(timestamp, 'dd/MM/yyyy');
+      }
+      
+      // Default fallback
+      return 'Invalid date';
+    } catch (error) {
+      console.error('Error formatting date:', error);
+      return 'Date error';
+    }
+  };
+
+  // Function to safely format time
+  const formatTime = (timestamp) => {
+    if (!timestamp) return 'No time';
+    
+    try {
+      if (timestamp && typeof timestamp.toDate === 'function') {
+        return format(timestamp.toDate(), 'HH:mm a');
+      }
+      
+      if (timestamp instanceof Date) {
+        return format(timestamp, 'HH:mm a');
+      }
+      
+      return 'Invalid time';
+    } catch (error) {
+      console.error('Error formatting time:', error);
+      return 'Time error';
+    }
+  };
+  
+  // Function to safely calculate progress
+  const calculateProgress = (days) => {
+    try {
+      if (!days || !Array.isArray(days)) return 0;
+      
+      let totalSessions = 0;
+      let completedSessions = 0;
+      
+      days.forEach(day => {
+        if (day && day.sessions && Array.isArray(day.sessions)) {
+          day.sessions.forEach(session => {
+            totalSessions++;
+            if (session && session.completed) {
+              completedSessions++;
+            }
+          });
+        }
+      });
+      
+      if (totalSessions === 0) return 0;
+      return Math.round((completedSessions / totalSessions) * 100);
+    } catch (error) {
+      console.error('Error calculating progress:', error);
+      return 0;
+    }
+  };
+  
+  // Fetch study plans when auth state changes
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        console.log('Auth state changed, user is logged in:', user.uid);
+        fetchStudyPlans();
+      } else {
+        console.log('Auth state changed, no user logged in');
+        setStudyPlans([]);
+        setError('You must be logged in to view study plans');
+      }
+    });
+    
+    return () => unsubscribe();
+  }, []); 
+  
+  // Fetch when refreshTrigger changes
+  useEffect(() => {
+    if (auth.currentUser) {
+      fetchStudyPlans();
+    }
+  }, [refreshTrigger]);
+
+  // Setup real-time listener for study plans
+  useEffect(() => {
+    setError(null);
+    const user = auth.currentUser;
+    if (!user) {
+      console.log('No user for real-time listener');
+      setLoading(false);
+      return;
+    }
+    
+    try {
+      console.log('Setting up real-time listener for study plans');
+      const q = query(
+        collection(db, 'studyPlans'),
+        where('userId', '==', user.uid)
+      );
+      
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        try {
+          console.log('Real-time update received, docs:', snapshot.size);
+          const plans = [];
+          
+          snapshot.forEach((doc) => {
+            try {
+              const data = doc.data();
+              // Ensure we have valid data
+              if (data) {
+                plans.push({
+                  id: doc.id,
+                  ...data,
+                  progress: calculateProgress(data.days || [])
+                });
+              }
+            } catch (docError) {
+              console.error('Error processing document:', docError);
+            }
+          });
+          
+          // Sort plans by creation date if available
+          const sortedPlans = plans.sort((a, b) => {
+            try {
+              // Use our safe date comparison logic
+              const dateA = a.createdAt && typeof a.createdAt.toDate === 'function' ? a.createdAt.toDate() : null;
+              const dateB = b.createdAt && typeof b.createdAt.toDate === 'function' ? b.createdAt.toDate() : null;
+              
+              if (dateA && dateB) return dateB - dateA;
+              if (dateA) return -1;
+              if (dateB) return 1;
+              return 0;
+            } catch (sortError) {
+              console.error('Error sorting plans:', sortError);
+              return 0;
+            }
+          });
+          
+          setStudyPlans(sortedPlans);
+        } catch (snapshotError) {
+          console.error('Error processing snapshot:', snapshotError);
+          setError('Error loading study plans');
+        } finally {
+          setLoading(false);
+        }
+      }, (error) => {
+        console.error('Error in real-time listener:', error);
+        setError(`Firestore error: ${error.message}. Please check your Firebase rules.`);
+        setLoading(false);
+      });
+      
+      return () => {
+        try {
+          unsubscribe();
+        } catch (error) {
+          console.error('Error unsubscribing:', error);
+        }
+      };
+    } catch (error) {
+      console.error('Error setting up listener:', error);
+      setError(`Error setting up Firestore listener: ${error.message}`);
+      setLoading(false);
+    }
+  }, [auth.currentUser?.uid]);
+
+  const fetchStudyPlans = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const user = auth.currentUser;
+      
+      console.log('Fetching study plans, user:', user ? user.uid : 'not logged in');
+      
+      if (!user) {
+        console.log('No user logged in, clearing study plans');
+        setStudyPlans([]);
+        return;
+      }
+      
+      // Query for this user's plans
+      const q = query(
+        collection(db, 'studyPlans'),
+        where('userId', '==', user.uid)
+      );
+      
+      const querySnapshot = await getDocs(q);
+      console.log('Study plans for current user:', querySnapshot.size);
+      
+      const plans = [];
+      
+      querySnapshot.forEach((doc) => {
+        try {
+          const data = doc.data();
+          if (data) {
+            console.log('Adding plan to list:', doc.id, data.name);
+            plans.push({
+              id: doc.id,
+              ...data,
+              progress: calculateProgress(data.days || [])
+            });
+          }
+        } catch (docError) {
+          console.error('Error processing document:', docError);
+        }
+      });
+      
+      // Sort plans safely
+      const sortedPlans = plans.sort((a, b) => {
+        try {
+          // Use our safe date comparison logic
+          const dateA = a.createdAt && typeof a.createdAt.toDate === 'function' ? a.createdAt.toDate() : null;
+          const dateB = b.createdAt && typeof b.createdAt.toDate === 'function' ? b.createdAt.toDate() : null;
+          
+          if (dateA && dateB) return dateB - dateA;
+          if (dateA) return -1;
+          if (dateB) return 1;
+          return 0;
+        } catch (sortError) {
+          console.error('Error sorting plans:', sortError);
+          return 0;
+        }
+      });
+      
+      console.log('Setting study plans:', sortedPlans.length);
+      setStudyPlans(sortedPlans);
+    } catch (error) {
+      console.error('Error fetching study plans:', error);
+      setError(`Error fetching study plans: ${error.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleToggleSession = async (dayIndex, sessionIndex) => {
+    try {
+      if (!selectedPlan) return;
+      
+      // Create a deep copy of the plan
+      const updatedPlan = JSON.parse(JSON.stringify(selectedPlan));
+      
+      // Toggle the completed status
+      const currentStatus = updatedPlan.days[dayIndex].sessions[sessionIndex].completed;
+      updatedPlan.days[dayIndex].sessions[sessionIndex].completed = !currentStatus;
+      
+      // Update in Firestore
+      await updateDoc(doc(db, 'studyPlans', selectedPlan.id), {
+        days: updatedPlan.days
+      });
+      
+      // Update local state
+      setSelectedPlan(updatedPlan);
+      
+      // Update in the list
+      setStudyPlans(prevPlans => 
+        prevPlans.map(plan => 
+          plan.id === selectedPlan.id 
+            ? {
+                ...plan,
+                days: updatedPlan.days,
+                progress: calculateProgress(updatedPlan.days)
+              } 
+            : plan
+        )
+      );
+    } catch (error) {
+      console.error('Error toggling session completion:', error);
+    }
+  };
+
+  const handleDeletePlan = async () => {
+    try {
+      if (!planToDelete) return;
+      
+      await deleteDoc(doc(db, 'studyPlans', planToDelete.id));
+      
+      setStudyPlans(prevPlans => 
+        prevPlans.filter(plan => plan.id !== planToDelete.id)
+      );
+      
+      setDeleteDialogOpen(false);
+      setPlanToDelete(null);
+    } catch (error) {
+      console.error('Error deleting study plan:', error);
+    }
+  };
+
+  const handleEditName = async () => {
+    try {
+      if (!selectedPlan || !newPlanName.trim()) return;
+      
+      await updateDoc(doc(db, 'studyPlans', selectedPlan.id), {
+        name: newPlanName.trim()
+      });
+      
+      setStudyPlans(prevPlans => 
+        prevPlans.map(plan => 
+          plan.id === selectedPlan.id 
+            ? { ...plan, name: newPlanName.trim() } 
+            : plan
+        )
+      );
+      
+      setEditDialogOpen(false);
+    } catch (error) {
+      console.error('Error updating plan name:', error);
+    }
+  };
+
+  const handleClearHistory = async () => {
+    try {
+      const user = auth.currentUser;
+      if (!user) return;
+      
+      const q = query(
+        collection(db, 'studyPlans'),
+        where('userId', '==', user.uid)
+      );
+      
+      const querySnapshot = await getDocs(q);
+      
+      const deletePromises = [];
+      querySnapshot.forEach((document) => {
+        deletePromises.push(deleteDoc(doc(db, 'studyPlans', document.id)));
+      });
+      
+      await Promise.all(deletePromises);
+      setStudyPlans([]);
+    } catch (error) {
+      console.error('Error clearing study plan history:', error);
+    }
+  };
+
+  return (
+    <Box sx={{ mt: 6 }}>
+      <Box sx={{ 
+        display: 'flex', 
+        justifyContent: 'space-between', 
+        alignItems: 'center',
+        mb: 2
+      }}>
+        <Typography variant="h6" sx={{ 
+          display: 'flex', 
+          alignItems: 'center',
+          color: '#4285F4'
+        }}>
+          <HistoryIcon sx={{ mr: 1 }} />
+          Training Plan History
+        </Typography>
+        
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+          {auth.currentUser ? (
+            <Typography variant="caption" color="success.main" sx={{ 
+              display: 'flex', 
+              alignItems: 'center', 
+              bgcolor: 'rgba(52, 168, 83, 0.1)',
+              px: 1,
+              py: 0.5,
+              borderRadius: '12px'
+            }}>
+              Logged in as {auth.currentUser.displayName || auth.currentUser.email}
+            </Typography>
+          ) : (
+            <Typography variant="caption" color="error" sx={{ 
+              display: 'flex', 
+              alignItems: 'center',
+              bgcolor: 'rgba(234, 67, 53, 0.1)',
+              px: 1,
+              py: 0.5,
+              borderRadius: '12px'
+            }}>
+              Not logged in
+            </Typography>
+          )}
+          
+          {studyPlans.length > 0 && (
+            <Button 
+              variant="outlined" 
+              size="small"
+              onClick={handleClearHistory}
+              sx={{ borderRadius: '20px' }}
+            >
+              Clear History
+            </Button>
+          )}
+        </Box>
+      </Box>
+      
+      {error && (
+        <Alert severity="error" sx={{ mb: 2 }}>
+          {error}
+        </Alert>
+      )}
+      
+      {loading ? (
+        <Box sx={{ display: 'flex', justifyContent: 'center', my: 4 }}>
+          <CircularProgress />
+        </Box>
+      ) : studyPlans.length === 0 ? (
+        <Card sx={{ 
+          borderRadius: '20px', 
+          p: 3, 
+          textAlign: 'center',
+          bgcolor: 'rgba(0, 0, 0, 0.02)'
+        }}>
+          <Typography color="text.secondary">
+            No study plans saved yet. Create a study plan to see it here.
+          </Typography>
+        </Card>
+      ) : (
+        <Grid container spacing={3}>
+          {studyPlans.map((plan) => (
+            <Grid item xs={12} md={6} key={plan.id}>
+              <Card sx={{ 
+                borderRadius: '20px',
+                overflow: 'hidden',
+                bgcolor: 'rgba(240, 247, 255, 0.5)',
+                transition: 'transform 0.2s',
+                '&:hover': {
+                  transform: 'translateY(-4px)',
+                  boxShadow: '0 8px 16px rgba(0, 0, 0, 0.1)'
+                }
+              }}>
+                <CardContent sx={{ p: 0 }}>
+                  <Box sx={{ 
+                    display: 'flex', 
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    p: 2,
+                    bgcolor: 'rgba(66, 133, 244, 0.1)'
+                  }}>
+                    <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                      <IconButton 
+                        size="small" 
+                        onClick={() => {
+                          setSelectedPlan(plan);
+                          setNewPlanName(plan.name);
+                          setEditDialogOpen(true);
+                        }}
+                        sx={{ mr: 1 }}
+                      >
+                        <EditIcon fontSize="small" />
+                      </IconButton>
+                      <Typography variant="h6" sx={{ fontWeight: 500 }}>
+                        {plan.name}
+                      </Typography>
+                    </Box>
+                    <Box>
+                      <Typography variant="caption" sx={{ 
+                        display: 'inline-block',
+                        bgcolor: 'rgba(66, 133, 244, 0.2)',
+                        px: 1,
+                        py: 0.5,
+                        borderRadius: '12px',
+                        fontWeight: 500
+                      }}>
+                        {formatDate(plan.createdAt)}
+                      </Typography>
+                      <IconButton 
+                        size="small" 
+                        onClick={() => {
+                          setPlanToDelete(plan);
+                          setDeleteDialogOpen(true);
+                        }}
+                        sx={{ ml: 1 }}
+                      >
+                        <DeleteIcon fontSize="small" color="error" />
+                      </IconButton>
+                    </Box>
+                  </Box>
+                  
+                  <Box sx={{ p: 2 }}>
+                    <Typography variant="body2" sx={{ mb: 1 }}>
+                      Progress
+                    </Typography>
+                    <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
+                      <LinearProgress 
+                        variant="determinate" 
+                        value={plan.progress} 
+                        sx={{ 
+                          flexGrow: 1, 
+                          mr: 1,
+                          height: 8,
+                          borderRadius: 4
+                        }} 
+                      />
+                      <Typography variant="body1" color="primary" fontWeight="bold">
+                        {plan.progress}%
+                      </Typography>
+                    </Box>
+                    
+                    <Typography variant="body2" sx={{ 
+                      mb: 2,
+                      display: '-webkit-box',
+                      WebkitLineClamp: 2,
+                      WebkitBoxOrient: 'vertical',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis'
+                    }}>
+                      {plan.overview || 'No overview available'}
+                    </Typography>
+                    
+                    <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2 }}>
+                      <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                        <Typography variant="body2" color="text.secondary">
+                          {plan.timePerDay || 0} minutes/day
+                        </Typography>
+                      </Box>
+                      
+                      <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                        <Typography variant="body2" color="text.secondary">
+                          {plan.days?.length || 0} days
+                        </Typography>
+                      </Box>
+                      
+                      <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                        <Typography variant="body2" color="text.secondary">
+                          Saved on {formatTime(plan.createdAt)}
+                        </Typography>
+                      </Box>
+                    </Box>
+                    <Button
+                      variant="contained"
+                      fullWidth
+                      onClick={() => setSelectedPlan(plan)}
+                      sx={{ 
+                        mt: 2,
+                        borderRadius: '20px'
+                      }}
+                    >
+                      View Details
+                    </Button>
+                  </Box>
+                </CardContent>
+              </Card>
+            </Grid>
+          ))}
+        </Grid>
+      )}
+      
+      {/* Plan Details Dialog */}
+      {selectedPlan && (
+        <Dialog
+          open={!!selectedPlan}
+          onClose={() => setSelectedPlan(null)}
+          maxWidth="md"
+          fullWidth
+        >
+          <DialogTitle>
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Typography variant="h6">{selectedPlan.name}</Typography>
+              <IconButton onClick={() => setSelectedPlan(null)}>
+                <CloseIcon />
+              </IconButton>
+            </Box>
+          </DialogTitle>
+          <DialogContent dividers>
+            <List>
+              {selectedPlan.days && Array.isArray(selectedPlan.days) && 
+               selectedPlan.days.map((day, dayIndex) => (
+                <React.Fragment key={dayIndex}>
+                  <Typography variant="subtitle1" sx={{ fontWeight: 500, mt: dayIndex > 0 ? 2 : 0 }}>
+                    Day {day?.day || dayIndex + 1}: {day?.date || 'No date'}
+                  </Typography>
+                  
+                  {day?.sessions && Array.isArray(day.sessions) && 
+                   day.sessions.map((session, sessionIndex) => (
+                    <ListItem key={sessionIndex} dense>
+                      <ListItemIcon>
+                        <Checkbox
+                          edge="start"
+                          checked={session?.completed || false}
+                          onChange={() => handleToggleSession(dayIndex, sessionIndex)}
+                          disableRipple
+                        />
+                      </ListItemIcon>
+                      <ListItemText
+                        primary={session?.title || 'Untitled Session'}
+                        secondary={`${session?.duration || 0} minutes - ${session?.description || 'No description'}`}
+                        sx={{
+                          '& .MuiListItemText-primary': {
+                            textDecoration: session?.completed ? 'line-through' : 'none',
+                            color: session?.completed ? 'text.disabled' : 'text.primary'
+                          }
+                        }}
+                      />
+                    </ListItem>
+                  ))}
+                </React.Fragment>
+              ))}
+            </List>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setSelectedPlan(null)}>Close</Button>
+          </DialogActions>
+        </Dialog>
+      )}
+      
+      {/* Edit Name Dialog */}
+      <Dialog open={editDialogOpen} onClose={() => setEditDialogOpen(false)}>
+        <DialogTitle>Edit Plan Name</DialogTitle>
+        <DialogContent>
+          <TextField
+            autoFocus
+            margin="dense"
+            label="Plan Name"
+            fullWidth
+            value={newPlanName}
+            onChange={(e) => setNewPlanName(e.target.value)}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEditDialogOpen(false)}>Cancel</Button>
+          <Button onClick={handleEditName} color="primary">Save</Button>
+        </DialogActions>
+      </Dialog>
+      
+      {/* Delete Confirmation Dialog */}
+      <Dialog open={deleteDialogOpen} onClose={() => setDeleteDialogOpen(false)}>
+        <DialogTitle>Delete Study Plan</DialogTitle>
+        <DialogContent>
+          <Typography>
+            Are you sure you want to delete this study plan? This action cannot be undone.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteDialogOpen(false)}>Cancel</Button>
+          <Button onClick={handleDeletePlan} color="error">Delete</Button>
+        </DialogActions>
+      </Dialog>
+    </Box>
+  );
+};
+
+export default StudyPlanHistory;

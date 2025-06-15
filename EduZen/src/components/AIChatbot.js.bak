@@ -1,0 +1,1805 @@
+import React, { useState, useEffect, useRef, useCallback, memo, lazy, Suspense } from 'react';
+import {
+  Typography,
+  Paper,
+  TextField,
+  Box,
+  Card,
+  IconButton,
+  List,
+  ListItem,
+  Avatar,
+  Tooltip,
+  Divider,
+  CircularProgress,
+  Chip,
+  Button,
+  ButtonGroup,
+  Badge,
+  Slider,
+  CardContent,
+  useTheme,
+  Menu,
+  MenuItem,
+  ListItemText,
+  ListItemIcon
+} from '@mui/material';
+import SendIcon from '@mui/icons-material/Send';
+import SmartToyIcon from '@mui/icons-material/SmartToy';
+import PersonIcon from '@mui/icons-material/Person';
+import SentimentSatisfiedAltIcon from '@mui/icons-material/SentimentSatisfiedAlt';
+import SentimentVeryDissatisfiedIcon from '@mui/icons-material/SentimentVeryDissatisfied';
+import SentimentDissatisfiedIcon from '@mui/icons-material/SentimentDissatisfied';
+import MoodIcon from '@mui/icons-material/Mood';
+import MicIcon from '@mui/icons-material/Mic';
+import MicOffIcon from '@mui/icons-material/MicOff';
+import VolumeUpIcon from '@mui/icons-material/VolumeUp';
+import VolumeOffIcon from '@mui/icons-material/VolumeOff';
+import VolumeDownIcon from '@mui/icons-material/VolumeDown';
+import VolumeMuteIcon from '@mui/icons-material/VolumeMute';
+import RecordVoiceOverIcon from '@mui/icons-material/RecordVoiceOver';
+import ArrowDropDownIcon from '@mui/icons-material/ArrowDropDown';
+import StopIcon from '@mui/icons-material/Stop';
+import { v4 as uuidv4 } from 'uuid';
+import { getGeminiResponse } from '../services/gemini';
+import { getCurrentUser } from '../services/auth';
+import SpeechRecognitionService from '../services/speechRecognition';
+import TextToSpeechService from '../services/textToSpeech';
+
+// Lazy load breathing exercise component
+const BreathingExercise = lazy(() => import('./BreathingExercise'));
+
+const AIChatbot = () => {
+  const theme = useTheme();
+  const [currentUser, setCurrentUser] = useState(null);
+  const [message, setMessage] = useState('');
+  const [chatHistory, setChatHistory] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const chatEndRef = useRef(null);
+  const chatContainerRef = useRef(null);
+
+  // Voice selection states
+  const [availableVoices, setAvailableVoices] = useState([]);
+  const [currentVoice, setCurrentVoice] = useState(null);
+  const [voiceMenuAnchorEl, setVoiceMenuAnchorEl] = useState(null);
+
+  // Breathing exercise states
+  const [showBreathingPrompt, setShowBreathingPrompt] = useState(false);
+  const [showBreathingExercise, setShowBreathingExercise] = useState(false);
+
+  // Brown noise states
+  const [showBrownNoisePrompt, setShowBrownNoisePrompt] = useState(false);
+  const [showBrownNoisePlayer, setShowBrownNoisePlayer] = useState(false);
+
+  // Emotion detection state
+  const [detectedEmotion, setDetectedEmotion] = useState(null);
+
+  // Voice input/output states
+  const [isListening, setIsListening] = useState(false);
+  const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const speechRecognitionRef = useRef(null);
+  const textToSpeechRef = useRef(null);
+  const [speechSupported, setSpeechSupported] = useState(false);
+  const [partialTranscript, setPartialTranscript] = useState('');
+
+  // Jarvis-like response tracking states
+  const [fileSummarized, setFileSummarized] = useState(false);
+  const [fileUploaded, setFileUploaded] = useState(false);
+  const [planCompleted, setPlanCompleted] = useState(false);
+
+  // Initialize speech services on component mount
+  useEffect(() => {
+    // Initialize speech recognition service
+    const speechRecognition = new SpeechRecognitionService();
+    speechRecognitionRef.current = speechRecognition;
+
+    // Initialize text-to-speech service
+    const textToSpeech = new TextToSpeechService();
+    textToSpeechRef.current = textToSpeech;
+
+    // Check if speech recognition is supported
+    setSpeechSupported(speechRecognition.isSupported);
+
+    // Load available voices
+    textToSpeech.getVoices((voices) => {
+      setAvailableVoices(voices);
+      // Set the current voice
+      setCurrentVoice(textToSpeech.getCurrentVoice());
+    });
+
+    // Set up event handlers for speech recognition
+    if (speechRecognition.isSupported) {
+      // Handle interim results (partial speech)
+      speechRecognition.onResult = (transcript, isFinal) => {
+        setPartialTranscript(transcript);
+      };
+
+      // Handle final speech after silence is detected
+      speechRecognition.onSilenceEnd = (finalTranscript) => {
+        if (finalTranscript.trim()) {
+          setMessage(finalTranscript.trim());
+          setTimeout(() => {
+            handleSendMessage(finalTranscript.trim());
+          }, 100);
+        }
+      };
+
+      // Handle listening state changes
+      speechRecognition.onListeningChange = (listening) => {
+        setIsListening(listening);
+      };
+    }
+
+    // Clean up on component unmount
+    return () => {
+      if (speechRecognitionRef.current) {
+        speechRecognitionRef.current.stop();
+      }
+      if (textToSpeechRef.current) {
+        textToSpeechRef.current.stop();
+      }
+    };
+  }, []);
+
+  // Get current user on component mount
+  useEffect(() => {
+    const fetchUser = async () => {
+      try {
+        const user = await getCurrentUser();
+        setCurrentUser(user);
+        console.log('Current user:', user);
+
+        // Always show a welcome message on component mount
+        const welcomeMessage = {
+          id: uuidv4(),
+          sender: 'assistant',
+          message: user
+            ? `Hello ${user.username || 'there'}! I'm your AI Study Assistant. How can I help you today?`
+            : "Hello! I'm your AI Study Assistant. How can I help you today?",
+          timestamp: new Date()
+        };
+
+        setChatHistory([welcomeMessage]);
+
+        // Speak the welcome message if voice is enabled
+        if (voiceEnabled && textToSpeechRef.current) {
+          setTimeout(() => {
+            setIsSpeaking(true);
+            textToSpeechRef.current.speak(welcomeMessage.message, () => {
+              setIsSpeaking(false);
+            });
+          }, 1000);
+        }
+      } catch (error) {
+        console.error('Error fetching user:', error);
+      }
+    };
+
+    fetchUser();
+  }, [voiceEnabled]);
+
+  // Track the last processed file to prevent duplicate messages
+  const lastProcessedFileRef = useRef(null);
+  const lastProcessedTimeRef = useRef(null);
+  
+  // Listen for external events to trigger Jarvis-like responses
+  useEffect(() => {
+    // Create global variables to track event timestamps
+    if (!window._lastFileUploadTime) {
+      window._lastFileUploadTime = 0;
+    }
+    if (!window._lastAnalyzeContentTime) {
+      window._lastAnalyzeContentTime = 0;
+    }
+    if (!window._lastGenerateStudyPlanTime) {
+      window._lastGenerateStudyPlanTime = 0;
+    }
+    
+    // Create event listeners for custom events with debouncing built in
+    const handleFileUpload = (event) => {
+      // Get current time
+      const now = new Date().getTime();
+      
+      // If another file upload was processed within the last 3 seconds, ignore this one
+      if (now - window._lastFileUploadTime < 3000) {
+        console.log('Ignoring duplicate file upload event - too soon after previous one');
+        return;
+      }
+      
+      // Update the global timestamp
+      window._lastFileUploadTime = now;
+      
+      // Extract file details
+      const { fileType, fileName } = event.detail || {};
+      setFileUploaded(true);
+      
+      // Create a custom response based on file type
+      let response;
+      if (fileName && fileName.toLowerCase().endsWith('.pdf')) {
+        response = `Great! I've received your PDF document "${fileName}". I'll start processing it right away.`;
+      } else {
+        response = `Thanks for uploading your file! I'm processing it now.`;
+      }
+
+      // Clear any previous identical messages first
+      setChatHistory(prev => {
+        // Remove any identical messages from the last 5 seconds
+        const filtered = prev.filter(msg => {
+          if (msg.sender === 'assistant' && msg.message === response) {
+            const msgTime = msg.timestamp.getTime();
+            return (now - msgTime) > 5000; // Keep messages older than 5 seconds
+          }
+          return true; // Keep all other messages
+        });
+        return filtered;
+      });
+      
+      // Add an action message to show the upload in the middle of the chat
+      const actionMessage = {
+        id: uuidv4(),
+        type: 'action',
+        action: 'upload',
+        message: fileName ? `File "${fileName}" uploaded` : 'File uploaded successfully!',
+        timestamp: new Date()
+      };
+      
+      // Add the action message to the chat history
+      setChatHistory(prev => [...prev, actionMessage]);
+      
+      // Add the assistant response after a short delay
+      setTimeout(() => {
+        addAssistantMessage(response);
+      }, 500);
+    };
+
+    const handleFileSummarized = (event) => {
+      setFileSummarized(true);
+      addAssistantMessage("I've finished summarizing your document. Are you okay with the summary, or would you like me to adjust anything?");
+    };
+
+    const handlePlanCompleted = (event) => {
+      setPlanCompleted(true);
+      const planName = event.detail?.planName || "your study plan";
+      const suggestions = [
+        "set some new learning goals",
+        "review what you've learned so far",
+        "take a well-deserved break before starting something new",
+        "explore a related topic to deepen your understanding"
+      ];
+      const randomSuggestion = suggestions[Math.floor(Math.random() * suggestions.length)];
+
+      addAssistantMessage(`Congratulations on completing ${planName}! That's a significant achievement. Would you like to ${randomSuggestion}?`);
+    };
+    
+    // Handle study plan generation
+    const handleGenerateStudyPlan = (event) => {
+      // Get current time
+      const now = new Date().getTime();
+      
+      // If another study plan generation was processed within the last 3 seconds, ignore this one
+      if (now - window._lastGenerateStudyPlanTime < 3000) {
+        console.log('Ignoring duplicate study plan generation event - too soon after previous one');
+        return;
+      }
+      
+      // Update the global timestamp
+      window._lastGenerateStudyPlanTime = now;
+      
+      const { difficulty, timeAvailable, daysToComplete, learningStyle } = event.detail || {};
+      
+      // Get learning style label
+      let learningStyleLabel = "visual";
+      if (learningStyle === "auditory") learningStyleLabel = "auditory";
+      if (learningStyle === "reading") learningStyleLabel = "reading/writing";
+      if (learningStyle === "kinesthetic") learningStyleLabel = "hands-on";
+      
+      // Add an action message to show the study plan generation in the middle of the chat
+      const actionMessage = {
+        id: uuidv4(),
+        type: 'action',
+        action: 'generate_study_plan',
+        message: 'Generating personalized study plan...',
+        timestamp: new Date()
+      };
+      
+      // Add the action message to the chat history
+      setChatHistory(prev => [...prev, actionMessage]);
+      
+      // Create a personalized message about creating the study plan
+      const response = `I'm creating a personalized study plan tailored to your needs. This ${difficulty > 5 ? 'challenging' : 'balanced'} plan is designed for ${timeAvailable} minutes of daily study over ${daysToComplete} days, optimized for your ${learningStyleLabel} learning style. The plan will break down complex topics into manageable sessions to maximize your learning efficiency.`;
+      
+      // Add the assistant response after a short delay
+      setTimeout(() => {
+        addAssistantMessage(response);
+      }, 500);
+    };
+
+    // Create a handler for content analysis
+    const handleAnalyzeContent = (event) => {
+      // Get current time
+      const now = new Date().getTime();
+      
+      // If another content analysis was processed within the last 3 seconds, ignore this one
+      if (now - window._lastAnalyzeContentTime < 3000) {
+        console.log('Ignoring duplicate content analysis event - too soon after previous one');
+        return;
+      }
+      
+      // Update the global timestamp
+      window._lastAnalyzeContentTime = now;
+      
+      // Extract file details
+      const { fileType, fileName } = event.detail || {};
+      
+      // Add an action message to show the content analysis in the middle of the chat
+      const actionMessage = {
+        id: uuidv4(),
+        type: 'action',
+        action: 'analyze_content',
+        message: 'Analyzing your content for insights...',
+        timestamp: new Date()
+      };
+      
+      // Add the action message to the chat history
+      setChatHistory(prev => [...prev, actionMessage]);
+      
+      // Create a response based on file type
+      let response = "I'm analyzing your content to extract key information and generate meaningful insights. This will help you better understand the material and prepare for effective studying.";
+      
+      // Add the assistant response after a short delay
+      setTimeout(() => {
+        addAssistantMessage(response);
+      }, 500);
+    };
+    
+    // Register event listeners
+    window.addEventListener('scholarai:fileUploaded', handleFileUpload);
+    window.addEventListener('scholarai:fileSummarized', handleFileSummarized);
+    window.addEventListener('scholarai:planCompleted', handlePlanCompleted);
+    window.addEventListener('scholarai:generateStudyPlan', handleGenerateStudyPlan);
+    window.addEventListener('eduzen:analyzeContent', handleAnalyzeContent);
+
+    // Cleanup function to remove event listeners
+    return () => {
+      window.removeEventListener('scholarai:fileUploaded', handleFileUpload);
+      window.removeEventListener('scholarai:fileSummarized', handleFileSummarized);
+      window.removeEventListener('scholarai:planCompleted', handlePlanCompleted);
+      window.removeEventListener('scholarai:generateStudyPlan', handleGenerateStudyPlan);
+      window.removeEventListener('eduzen:analyzeContent', handleAnalyzeContent);
+    };
+  }, []);
+
+  // Auto-scroll the chat container when chat updates - contained within the chatbox
+  useEffect(() => {
+    scrollToBottom();
+  }, [chatHistory]);
+
+  // Scroll to bottom function
+  const scrollToBottom = useCallback(() => {
+    // Use requestAnimationFrame for smoother scrolling performance and to ensure DOM is ready
+    requestAnimationFrame(() => {
+      if (chatContainerRef.current) {
+        try {
+          // This scrolls only the chat container, not the entire page
+          chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+        } catch (error) {
+          console.error('Error scrolling chat container:', error);
+        }
+      }
+    });
+  }, []);
+
+  // Helper function to add assistant messages
+  const addAssistantMessage = useCallback((messageText) => {
+    // Check if this exact message was just added to prevent duplicates
+    const isDuplicate = chatHistory.length > 0 && 
+      chatHistory[chatHistory.length - 1].sender === 'assistant' && 
+      chatHistory[chatHistory.length - 1].message === messageText &&
+      (new Date().getTime() - chatHistory[chatHistory.length - 1].timestamp.getTime() < 5000);
+    
+    // If it's a duplicate message sent within the last 5 seconds, don't add it again
+    if (isDuplicate) {
+      console.log('Preventing duplicate assistant message:', messageText);
+      return;
+    }
+    
+    const newMessage = {
+      id: uuidv4(),
+      sender: 'assistant',
+      message: messageText,
+      timestamp: new Date()
+    };
+
+    setChatHistory(prev => [...prev, newMessage]);
+
+    // Speak the message if voice is enabled
+    if (voiceEnabled && textToSpeechRef.current) {
+      setIsSpeaking(true);
+      textToSpeechRef.current.speak(messageText, () => {
+        setIsSpeaking(false);
+      });
+    }
+
+    // Scroll to bottom
+    setTimeout(() => {
+      scrollToBottom();
+    }, 100);
+  }, [voiceEnabled, scrollToBottom, chatHistory]);
+
+
+
+  // Format text by removing markdown formatting
+  const formatText = useCallback((text) => {
+    if (!text) return '';
+
+    // Remove bold formatting
+    let formatted = text.replace(/\*\*(.*?)\*\*/g, '$1');
+
+    // Remove italic formatting
+    formatted = formatted.replace(/\*(.*?)\*/g, '$1');
+
+    // Remove code blocks
+    formatted = formatted.replace(/``\[(.*?)\]``/gs, '$1');
+
+    // Remove inline code
+    formatted = formatted.replace(/\[(.*?)\]/g, '$1');
+
+    return formatted;
+  }, []);
+
+  // Get emotion icon based on detected emotion
+  const getEmotionIcon = useCallback(() => {
+    if (!detectedEmotion) return null;
+
+    switch (detectedEmotion.toLowerCase()) {
+      case 'happy':
+      case 'excited':
+      case 'joy':
+        return <MoodIcon fontSize="small" sx={{ color: '#4caf50' }} />;
+      case 'neutral':
+      case 'calm':
+        return <SentimentSatisfiedAltIcon fontSize="small" sx={{ color: '#2196f3' }} />;
+      case 'sad':
+      case 'depressed':
+      case 'worried':
+      case 'fear':
+        return <SentimentDissatisfiedIcon fontSize="small" sx={{ color: '#ff9800' }} />;
+      case 'angry':
+      case 'frustrated':
+      case 'stress':
+      case 'stressed':
+      case 'anxiety':
+      case 'irritated':
+        return <SentimentVeryDissatisfiedIcon fontSize="small" sx={{ color: '#f44336' }} />;
+      default:
+        return <SentimentSatisfiedAltIcon fontSize="small" />;
+    }
+  }, [detectedEmotion]);
+
+  // Toggle voice input on/off
+  const toggleVoiceInput = useCallback(() => {
+    if (!speechRecognitionRef.current) return;
+
+    const newState = speechRecognitionRef.current.toggle();
+    setIsListening(newState);
+
+    // If enabling voice, clear the input field
+    if (newState) {
+      setMessage('');
+      setPartialTranscript('');
+    }
+  }, []);
+
+  // Toggle voice output on/off
+  const toggleVoiceOutput = useCallback(() => {
+    if (!textToSpeechRef.current) return;
+
+    const newState = !voiceEnabled;
+    setVoiceEnabled(newState);
+    textToSpeechRef.current.setEnabled(newState);
+
+    // If disabling, stop any current speech
+    if (!newState && textToSpeechRef.current) {
+      textToSpeechRef.current.stop();
+      setIsSpeaking(false);
+    }
+  }, [voiceEnabled]);
+
+  // Stop currently playing speech
+  const stopSpeech = useCallback(() => {
+    if (textToSpeechRef.current) {
+      textToSpeechRef.current.stop();
+      setIsSpeaking(false);
+    }
+  }, []);
+
+  // Handle breathing exercise responses
+  const handleBreathingResponse = useCallback((response) => {
+    // First, hide the prompt regardless of response
+    setShowBreathingPrompt(false);
+
+    if (response === 'yes') {
+      setShowBreathingExercise(true);
+
+      // Add a message from the assistant about starting the exercise
+      const breathingStartMessage = {
+        id: uuidv4(),
+        sender: 'assistant',
+        message: "Great! Let's start the 4-7-8 breathing exercise. Follow along with the guided exercise below. This technique can help reduce anxiety and stress quickly.",
+        timestamp: new Date()
+      };
+
+      setChatHistory(prev => [...prev, breathingStartMessage]);
+
+      // Speak the message if voice is enabled
+      if (voiceEnabled && textToSpeechRef.current) {
+        setIsSpeaking(true);
+        textToSpeechRef.current.speak(breathingStartMessage.message, () => {
+          setIsSpeaking(false);
+        });
+      }
+    } else {
+      // Add a message from the assistant acknowledging the user's choice
+      const declineMessage = {
+        id: uuidv4(),
+        sender: 'assistant',
+        message: "That's okay! If you change your mind later, just let me know you're feeling tired and I can guide you through a breathing exercise. Is there anything else I can help you with today?",
+        timestamp: new Date()
+      };
+
+      setChatHistory(prev => [...prev, declineMessage]);
+
+      // Speak the message if voice is enabled
+      if (voiceEnabled && textToSpeechRef.current) {
+        setIsSpeaking(true);
+        textToSpeechRef.current.speak(declineMessage.message, () => {
+          setIsSpeaking(false);
+        });
+      }
+    }
+  }, [voiceEnabled]);
+
+  // Handle brown noise responses
+  const handleBrownNoiseResponse = useCallback((response) => {
+    // First, hide the prompt regardless of response
+    setShowBrownNoisePrompt(false);
+
+    if (response === 'yes') {
+      setShowBrownNoisePlayer(true);
+
+      // Add a message from the assistant about starting the brown noise
+      const brownNoiseStartMessage = {
+        id: uuidv4(),
+        sender: 'assistant',
+        message: "Great! I've started playing brown noise to help you focus. You can adjust the volume or stop it using the controls below. Brown noise can help mask distracting sounds and improve concentration.",
+    sender: 'assistant',
+    message: "How do you feel after the breathing exercise? I hope it helped you relax a bit. Remember you can practice this 4-7-8 technique anytime you feel stressed or tired.",
+    timestamp: new Date()
+  };
+
+  setChatHistory(prev => [...prev, feedbackMessage]);
+
+  // Speak the message if voice is enabled
+  if (voiceEnabled && textToSpeechRef.current) {
+    setIsSpeaking(true);
+    textToSpeechRef.current.speak(feedbackMessage.message, () => {
+      setIsSpeaking(false);
+    });
+  }
+}, [voiceEnabled]);
+
+// Handle closing the breathing exercise prompt
+const handleCloseBreathingPrompt = useCallback(() => {
+  setShowBreathingPrompt(false);
+  
+  // Add action message for completing breathing exercise
+  setChatHistory(prev => [
+    ...prev,
+    {
+      id: uuidv4(),
+      sender: 'system',
+      message: 'Breathing exercise completed',
+      timestamp: new Date(),
+      type: 'action'
+    }
+  ]);
+  
+  // Add assistant message after the action
+  setTimeout(() => {
+    addAssistantMessage('Great job completing the breathing exercise! How are you feeling now?');
+  }, 500);
+}, []);
+
+// Handle closing the brown noise prompt
+const handleCloseBrownNoisePrompt = useCallback(() => {
+  setShowBrownNoisePrompt(false);
+  
+  // Add action message for completing brown noise session
+  setChatHistory(prev => [
+    ...prev,
+    {
+      id: uuidv4(),
+      sender: 'system',
+      message: 'Brown noise session completed',
+      timestamp: new Date(),
+      type: 'action'
+    }
+  ]);
+  
+  // Add assistant message after the action
+  setTimeout(() => {
+    addAssistantMessage('I hope the brown noise helped you focus. How was your experience?');
+  }, 500);
+}, []);
+
+// Handle stopping the brown noise player
+const handleStopBrownNoise = useCallback(() => {
+  setShowBrownNoisePlayer(false);
+    const emotionKeywords = {
+      happy: ['happy', 'joy', 'glad', 'excited', 'wonderful', 'fantastic', 'great'],
+      sad: ['sad', 'depressed', 'unhappy', 'miserable', 'down', 'blue', 'upset', 'cry'],
+      angry: ['angry', 'mad', 'annoyed', 'irritated', 'furious', 'hate'],
+      stressed: ['stress', 'stressed', 'anxiety', 'anxious', 'overwhelmed', 'pressure'],
+      worried: ['worry', 'worried', 'fear', 'scared', 'nervous', 'concerned', 'afraid'],
+      neutral: ['fine', 'okay', 'ok', 'alright', 'neutral', 'normal']
+    };
+
+    const textLower = text.toLowerCase();
+
+    // Check for emotion keywords
+    for (const [emotion, keywords] of Object.entries(emotionKeywords)) {
+      if (keywords.some(keyword => textLower.includes(keyword))) {
+        return emotion;
+      }
+    }
+
+    // Check for can't focus specifically
+    if (textLower.includes("can't focus") ||
+        textLower.includes("cant focus") ||
+        textLower.includes("cannot focus") ||
+        textLower.includes("trouble focusing") ||
+        textLower.includes("hard to concentrate") ||
+        textLower.includes("difficult to focus") ||
+        textLower.includes("struggling to focus") ||
+        textLower.includes("distracted") ||
+        textLower.includes("not able to focus") ||
+        textLower.includes("having trouble focusing") ||
+        textLower.includes("can't concentrate") ||
+        textLower.includes("cant concentrate")) {
+      return 'unfocused';
+    }
+
+    // Check for user asking about summary
+    if (textLower.includes("summary") && 
+        (textLower.includes("good") || 
+         textLower.includes("like") || 
+         textLower.includes("what do you think") ||
+         textLower.includes("how is") ||
+         textLower.includes("opinion"))) {
+      return 'askingAboutSummary';
+    }
+
+    // Check for completing a study plan
+    if ((textLower.includes("complete") || 
+         textLower.includes("finished") || 
+         textLower.includes("done with")) && 
+        (textLower.includes("plan") || 
+         textLower.includes("module") || 
+         textLower.includes("course") ||
+         textLower.includes("assignment"))) {
+      return 'planCompleted';
+    }
+
+    return null;
+  }, []);
+
+  const handleSendMessage = useCallback(async (inputMessage = null) => {
+    const messageToSend = inputMessage || message;
+    if (!messageToSend.trim()) return;
+
+    // Store the current message to prevent duplication
+    const currentMessageText = messageToSend.trim();
+    setMessage('');
+    setLoading(true);
+    setError(null);
+
+    // Create a new user message object
+    const userMessage = {
+      id: uuidv4(),
+      sender: 'user',
+      message: currentMessageText,
+      timestamp: new Date()
+    };
+
+    // Update local state immediately for better UX
+    setChatHistory(prev => [...prev, userMessage]);
+
+    try {
+      // Scroll to bottom after user message is added (only within the chat container)
+      setTimeout(() => {
+        scrollToBottom();
+      }, 100);
+
+      // Get previous messages to provide context
+      const previousMessages = chatHistory
+        .slice(-4) // Get last 4 messages for context
+        .map(msg => `${msg.sender === 'user' ? 'User' : 'Assistant'}: ${msg.message}`)
+        .join('\n');
+
+      // Create a prompt with context to prevent repetition
+      let enhancedPrompt = `Previous conversation:\n${previousMessages}\n\nUser's new question: ${currentMessageText}\n\nPlease provide a direct and helpful response to the user's latest question. Do not repeat previous explanations unless specifically asked to elaborate further.`;
+
+      // Add user context if logged in
+      if (currentUser) {
+        enhancedPrompt = `[Context: This is ${currentUser.username || 'a student'} using EduZen for their studies.]\n${enhancedPrompt}`;
+      }
+
+      console.log('Sending enhanced prompt to prevent repetition:', enhancedPrompt);
+
+      // Detect emotion from message
+      const detectedEmotionFromText = detectEmotion(currentMessageText);
+      if (detectedEmotionFromText) {
+        setDetectedEmotion(detectedEmotionFromText);
+      }
+
+      // Handle specific summarization feedback scenario
+      if (fileSummarized && 
+          (currentMessageText.toLowerCase().includes('yes') || 
+           currentMessageText.toLowerCase().includes('good') || 
+           currentMessageText.toLowerCase().includes('looks great') ||
+           currentMessageText.toLowerCase().includes('perfect'))) {
+        setFileSummarized(false); // Reset the flag
+        const response = "I'm glad you're happy with the summary! Is there anything specific from the summary you'd like me to explain in more depth?";
+
+        const aiMessage = {
+          id: uuidv4(),
+          sender: 'assistant',
+          message: response,
+          timestamp: new Date()
+        };
+
+        setChatHistory(prev => [...prev, aiMessage]);
+
+        if (voiceEnabled && textToSpeechRef.current) {
+          setIsSpeaking(true);
+          textToSpeechRef.current.speak(response, () => {
+            setIsSpeaking(false);
+          });
+        }
+
+        setLoading(false);
+        return;
+      }
+
+      // Check if user message indicates tiredness
+      const tiredKeywords = ['tired', 'exhausted', 'fatigued', 'sleepy', 'drained', 'no energy', 'worn out'];
+      const isTired = tiredKeywords.some(keyword => currentMessageText.toLowerCase().includes(keyword));
+
+      // Check if user is having trouble focusing
+      const unfocusedIndicators = ["can't focus", "cant focus", "cannot focus", "trouble focusing", "hard to concentrate",
+        "difficult to focus", "struggling to focus", "distracted", "losing focus",
+        "not able to focus", "having trouble focusing", "can't concentrate", "cant concentrate"];
+      const isUnfocused = unfocusedIndicators.some(phrase => currentMessageText.toLowerCase().includes(phrase));
+
+      console.log('Message:', currentMessageText);
+      console.log('Is unfocused:', isUnfocused);
+
+      // Handle focus-related messages first with highest priority
+      if (isUnfocused && !showBrownNoisePrompt && !showBrownNoisePlayer) {
+        console.log('Detected focus issue, triggering brown noise prompt');
+
+        // Get a personalized response for focus problems
+        const unfocusedPrompt = `${enhancedPrompt}\n\nNote: The user has mentioned they're having trouble focusing. Give a brief tip for focus (no more than one sentence) and immediately ask if they'd like to try brown noise to help with concentration.`;
+
+        const response = await getGeminiResponse(unfocusedPrompt);
+
+        const aiMessage = {
+          id: uuidv4(),
+          sender: 'assistant',
+          message: response,
+          timestamp: new Date()
+        };
+
+        // Update local state with AI response
+        setChatHistory(prev => [...prev, aiMessage]);
+
+        // Speak the response if voice is enabled
+        if (voiceEnabled && textToSpeechRef.current) {
+          setIsSpeaking(true);
+          textToSpeechRef.current.speak(response, () => {
+            setIsSpeaking(false);
+          });
+        }
+
+        // Show brown noise prompt IMMEDIATELY after the message
+        setShowBrownNoisePrompt(true);
+
+        // Return early to prevent other responses
+        setLoading(false);
+        return;
+      } else if (isTired && !showBreathingPrompt && !showBreathingExercise) {
+        // Get a more personalized response for tiredness
+        const tiredPrompt = `${enhancedPrompt}\n\nNote: The user has mentioned feeling tired. Respond with empathy and offer a breathing exercise. End your response with a specific question asking if they'd like to try a breathing exercise to help them refresh.`;
+
+        const response = await getGeminiResponse(tiredPrompt);
+
+        const aiMessage = {
+          id: uuidv4(),
+          sender: 'assistant',
+          message: response,
+          timestamp: new Date()
+        };
+
+        // Update local state with AI response
+        setChatHistory(prev => [...prev, aiMessage]);
+
+        // Speak the response if voice is enabled
+        if (voiceEnabled && textToSpeechRef.current) {
+          setIsSpeaking(true);
+          textToSpeechRef.current.speak(response, () => {
+            setIsSpeaking(false);
+          });
+        }
+
+        // Show breathing exercise prompt with a slight delay
+        setTimeout(() => {
+          setShowBreathingPrompt(true);
+        }, 500);
+      } else {
+        // Normal response for non-tired messages
+        const response = await getGeminiResponse(enhancedPrompt);
+
+        const aiMessage = {
+          id: uuidv4(),
+          sender: 'assistant',
+          message: response,
+          timestamp: new Date()
+        };
+
+        // Update local state with AI response
+        setChatHistory(prev => [...prev, aiMessage]);
+
+        // Speak the response if voice is enabled
+        if (voiceEnabled && textToSpeechRef.current) {
+          setIsSpeaking(true);
+          textToSpeechRef.current.speak(response, () => {
+            setIsSpeaking(false);
+          });
+        }
+      }
+
+      // Only scroll to the bottom if not showing breathing prompt
+      // This prevents auto-scrolling when the user may be typing
+      if (!showBreathingPrompt && !showBreathingExercise) {
+        setTimeout(() => {
+          scrollToBottom();
+        }, 100);
+      }
+    } catch (err) {
+      console.error('Error getting AI response:', err);
+      setError('Sorry, I encountered an error. Please try again.');
+
+      // Show error message in chat
+      setChatHistory(prev => [...prev, {
+        id: uuidv4(),
+        sender: 'assistant',
+        message: 'Sorry, I encountered an error. Please try again.',
+        timestamp: new Date(),
+        isError: true
+      }]);
+    } finally {
+      setLoading(false);
+    }
+  }, [message, chatHistory, currentUser, voiceEnabled, showBreathingPrompt, showBreathingExercise, showBrownNoisePrompt, showBrownNoisePlayer, detectEmotion, scrollToBottom]);
+
+  const handleKeyPress = useCallback((e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSendMessage();
+    }
+  }, [handleSendMessage]);
+
+  // Simple input change handler with no auto-send
+  const handleInputChange = useCallback((e) => {
+    const newValue = e.target.value;
+    setMessage(newValue);
+  }, []);
+
+  // Open voice selection menu
+  const handleVoiceMenuOpen = (event) => {
+    setVoiceMenuAnchorEl(event.currentTarget);
+  };
+
+  // Close voice selection menu
+  const handleVoiceMenuClose = () => {
+    setVoiceMenuAnchorEl(null);
+  };
+
+  // Change the voice
+  const handleVoiceChange = useCallback((voice) => {
+    if (!textToSpeechRef.current) return;
+
+    textToSpeechRef.current.setVoice(voice.voiceURI);
+    setCurrentVoice(voice);
+    handleVoiceMenuClose();
+
+    // If currently speaking, restart with new voice
+    if (isSpeaking) {
+      textToSpeechRef.current.stop();
+      // Small delay to allow stopping
+      setTimeout(() => {
+        const lastMessage = chatHistory.find(msg => msg.sender === 'assistant');
+        if (lastMessage) {
+          textToSpeechRef.current.speak(lastMessage.message, () => {
+            setIsSpeaking(false);
+          });
+        }
+      }, 100);
+    }
+  }, [chatHistory, isSpeaking]);
+
+  return (
+    <Paper
+      elevation={3}
+      sx={{
+        height: '100%',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        borderRadius: 2,
+        bgcolor: 'background.paper',
+        position: 'relative'
+      }}
+    >
+      <Box
+        sx={{
+          p: 2,
+          bgcolor: 'primary.main',
+          color: 'white',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between'
+        }}
+      >
+        {/* Voice selector on the left */}
+        <Box display="flex" alignItems="center">
+          {voiceEnabled && (
+            <Button
+              onClick={handleVoiceMenuOpen}
+              variant="outlined"
+              size="small"
+              startIcon={<RecordVoiceOverIcon fontSize="small" />}
+              endIcon={<ArrowDropDownIcon fontSize="small" />}
+              sx={{
+                color: 'white',
+                borderColor: 'rgba(255,255,255,0.5)',
+                '&:hover': {
+                  borderColor: 'white',
+                  backgroundColor: 'rgba(255,255,255,0.08)'
+                }
+              }}
+            >
+              {currentVoice ?
+                currentVoice.name.length > 15 ?
+                  `${currentVoice.name.substring(0, 15)}...` :
+                  currentVoice.name
+                : 'Select Voice'}
+            </Button>
+          )}
+          {/* Voice selection menu */}
+          <Menu
+            anchorEl={voiceMenuAnchorEl}
+            open={Boolean(voiceMenuAnchorEl)}
+            onClose={handleVoiceMenuClose}
+            PaperProps={{
+              sx: {
+                maxHeight: 300,
+                width: '280px',
+                overflow: 'auto'
+              }
+            }}
+          >
+            <Typography variant="subtitle2" sx={{ px: 2, pt: 1, color: 'text.secondary' }}>
+              Select a voice
+            </Typography>
+            <Divider sx={{ my: 1 }} />
+            {availableVoices.map((voice) => (
+              <MenuItem
+                key={voice.voiceURI}
+                onClick={() => handleVoiceChange(voice)}
+                selected={currentVoice && currentVoice.voiceURI === voice.voiceURI}
+                sx={{
+                  px: 2,
+                  py: 1,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'flex-start'
+                }}
+              >
+                <Typography variant="body1" sx={{ fontWeight: 'medium' }}>
+                  {voice.name}
+                </Typography>
+                <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                  {voice.lang} {voice.localService ? '(Local)' : '(Network)'}
+                </Typography>
+              </MenuItem>
+            ))}
+          </Menu>
+        </Box>
+
+        {/* Emotion detection on the right */}
+        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+          {detectedEmotion && (
+            <Chip
+              icon={getEmotionIcon()}
+              label={detectedEmotion.charAt(0).toUpperCase() + detectedEmotion.slice(1)}
+              variant="filled"
+              size="small"
+              sx={{
+                color: 'white',
+                borderColor: 'rgba(255,255,255,0.5)',
+                backgroundColor: 'rgba(255,255,255,0.15)'
+              }}
+            />
+          )}
+
+          {/* Voice indicators */}
+          {isSpeaking && (
+            <Chip
+              icon={<VolumeUpIcon fontSize="small" />}
+              label="Speaking"
+              variant="filled"
+              size="small"
+              color="secondary"
+              sx={{
+                bgcolor: 'rgba(255,255,255,0.15)',
+                color: 'white',
+                '& .MuiChip-icon': { color: 'white' }
+              }}
+            />
+          )}
+
+          {isListening && (
+            <Chip
+              icon={<MicIcon fontSize="small" />}
+              label="Listening"
+              variant="filled"
+              size="small"
+              color="error"
+              sx={{
+                bgcolor: 'rgba(255,255,255,0.15)',
+                color: 'white',
+                '& .MuiChip-icon': { color: 'white' }
+              }}
+            />
+          )}
+        </Box>
+      </Box>
+
+      <Divider />
+
+      <Box 
+        ref={chatContainerRef}
+        sx={{ 
+          flexGrow: 1, 
+          p: 2, 
+          overflowY: 'auto',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 2
+        }}
+      >
+        {chatHistory.length === 0 ? (
+          <Box 
+            sx={{ 
+              display: 'flex', 
+              flexDirection: 'column', 
+              alignItems: 'center', 
+              justifyContent: 'center',
+              height: '100%',
+              opacity: 0.7
+            }}
+          >
+            {/* Icon removed */}
+            <Typography variant="body1" align="center">
+              Hi there! I'm your AI Study Assistant. Ask me anything about your studies, 
+              or get help with understanding concepts, organizing your study schedule, 
+              or preparing for exams.
+            </Typography>
+          </Box>
+        ) : (
+          <React.Fragment>
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+              <Typography variant="subtitle1" sx={{ fontWeight: 'bold', color: 'primary.main' }}>
+                <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                  <SmartToyIcon sx={{ mr: 1 }} />
+                  Well Being Companion
+                </Box>
+              </Typography>
+            </Box>
+            
+            <List 
+              ref={chatContainerRef}
+              sx={{ 
+                width: '100%', 
+                overflow: 'auto', 
+                height: 'calc(100vh - 250px)',
+                mb: 2,
+                '&::-webkit-scrollbar': {
+                  width: '8px',
+                },
+                '&::-webkit-scrollbar-thumb': {
+                  backgroundColor: 'rgba(0, 0, 0, 0.2)',
+                  borderRadius: '4px',
+                },
+                '&::-webkit-scrollbar-track': {
+                  backgroundColor: 'rgba(0, 0, 0, 0.05)',
+                }
+              }}>
+              {chatHistory.map((chat) => {
+                // Check if this is an action message (like file upload)
+                if (chat.type === 'action') {
+                  return (
+                    <ListItem 
+                      key={chat.id}
+                      sx={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        padding: 1
+                      }}
+                    >
+                      <Box 
+                        sx={{ 
+                          display: 'flex',
+                          justifyContent: 'center',
+                          width: '100%',
+                          position: 'relative',
+                          my: 1
+                        }}
+                      >
+                        <Divider sx={{ width: '100%', position: 'absolute', top: '50%' }} />
+                        <Typography 
+                          variant="caption" 
+                          sx={{ 
+                            bgcolor: 'background.paper',
+                            px: 2,
+                            py: 0.5,
+                            borderRadius: 1,
+                            color: 'text.secondary',
+                            zIndex: 1,
+                            fontWeight: 'medium',
+                            border: '1px solid',
+                            borderColor: 'divider'
+                          }}
+                        >
+                          {chat.message}
+                        </Typography>
+                      </Box>
+                    </ListItem>
+                  );
+                }
+                
+                // Regular chat message
+                return (
+                  <ListItem 
+                    key={chat.id}
+                    sx={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: chat.sender === 'user' ? 'flex-end' : 'flex-start',
+                      padding: 1
+                    }}
+                  >
+                    <Box 
+                      sx={{ 
+                        display: 'flex',
+                        flexDirection: 'row',
+                        alignItems: 'flex-start',
+                        maxWidth: '80%'
+                      }}
+                    >
+                      {chat.sender === 'assistant' && (
+                        <Avatar 
+                          sx={{ 
+                            bgcolor: 'primary.main',
+                            width: 32,
+                            height: 32,
+                            mr: 1
+                          }}
+                        >
+                          <SmartToyIcon fontSize="small" />
+                        </Avatar>
+                      )}
+                      
+                      <Card 
+                        variant="outlined" 
+                        sx={{ 
+                          p: 2,
+                          borderRadius: 2,
+                          bgcolor: chat.sender === 'user' ? 'primary.light' : 'background.default',
+                          color: chat.sender === 'user' ? 'white' : 'text.primary',
+                          borderColor: chat.isError ? 'error.main' : 'transparent',
+                          maxWidth: '100%',
+                          wordBreak: 'break-word',
+                          position: 'relative'
+                        }}
+                      >
+                        <Typography variant="body1">
+                          {chat.message}
+                        </Typography>
+                        
+                        <Typography 
+                          variant="caption" 
+                          sx={{ 
+                            display: 'block',
+                            mt: 1,
+                            opacity: 0.7,
+                            textAlign: chat.sender === 'user' ? 'right' : 'left'
+                          }}
+                        >
+                          {chat.timestamp && typeof chat.timestamp.toLocaleTimeString === 'function' 
+                            ? chat.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                            : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </Typography>
+                      </Card>
+                      
+                      {chat.sender === 'user' && (
+                        <Avatar 
+                          sx={{ 
+                            bgcolor: 'primary.dark',
+                            width: 32,
+                            height: 32,
+                            ml: 1
+                          }}
+                        >
+                          <PersonIcon fontSize="small" />
+                        </Avatar>
+                      )}
+                    </Box>
+                  </ListItem>
+                );
+              })}
+            </List>
+            
+            {/* Breathing exercise prompt - integrated into chat flow */}
+            {showBreathingPrompt && (
+              <ListItem 
+                sx={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'flex-start',
+                  padding: 1,
+                  mb: 2
+                }}
+              >
+                <Box 
+                  sx={{ 
+                    display: 'flex',
+                    flexDirection: 'row',
+                    alignItems: 'flex-start',
+                    maxWidth: '80%'
+                  }}
+                >
+                  <Avatar 
+                    sx={{ 
+                      bgcolor: 'primary.main',
+                      width: 32,
+                      height: 32,
+                      mr: 1
+                    }}
+                  >
+                    <SmartToyIcon fontSize="small" />
+                  </Avatar>
+                  
+                  <Card 
+                    variant="outlined" 
+                    sx={{ 
+                      p: 2,
+                      borderRadius: 2,
+                      bgcolor: 'background.default',
+                      borderLeft: '4px solid',
+                      borderColor: 'primary.main'
+                    }}
+                  >
+                    <Typography variant="subtitle1" fontWeight="medium" sx={{ mb: 1 }}>
+                      Would you like to try a breathing exercise?  
+                    </Typography>
+                    <Typography variant="body2" sx={{ mb: 2 }}>
+                      The 4-7-8 breathing technique can help you relax, reduce stress and improve focus. It only takes a minute and can be very refreshing when you're feeling tired.
+                    </Typography>
+                    <Box sx={{ display: 'flex', gap: 1 }}>
+                      <Button 
+                        variant="contained" 
+                        onClick={() => handleBreathingResponse('yes')} 
+                        color="primary"
+                        size="small"
+                      >
+                        Yes, let's try it
+                      </Button>
+                      <Button 
+                        variant="outlined" 
+                        onClick={() => handleBreathingResponse('no')} 
+                        color="secondary"
+                        size="small"
+                      >
+                        No, thanks
+                      </Button>
+                    </Box>
+                    <Typography 
+                      variant="caption" 
+                      sx={{ 
+                        display: 'block',
+                        mt: 1,
+                        opacity: 0.7,
+                        textAlign: 'left'
+                      }}
+                    >
+                      {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </Typography>
+                  </Card>
+                </Box>
+              </ListItem>
+            )}
+            
+            {/* Breathing exercise component - integrated into chat flow */}
+            {showBreathingExercise && (
+              <ListItem 
+                sx={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  width: '100%',
+                  padding: 1,
+                  mb: 2
+                }}
+              >
+                <Suspense fallback={<CircularProgress />}>
+                  <BreathingExercise onStop={handleStopBreathingExercise} />
+                </Suspense>
+              </ListItem>
+            )}
+            
+            {/* Brown noise prompt - integrated into chat flow */}
+            {showBrownNoisePrompt && (
+              <ListItem 
+                sx={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'flex-start',
+                  padding: 1,
+                  mb: 2
+                }}
+              >
+                <Box 
+                  sx={{ 
+                    display: 'flex',
+                    flexDirection: 'row',
+                    alignItems: 'flex-start',
+                    maxWidth: '80%'
+                  }}
+                >
+                  <Avatar 
+                    sx={{ 
+                      bgcolor: 'primary.main',
+                      width: 32,
+                      height: 32,
+                      mr: 1
+                    }}
+                  >
+                    <SmartToyIcon fontSize="small" />
+                  </Avatar>
+                  
+                  <Card 
+                    variant="outlined" 
+                    sx={{ 
+                      p: 2,
+                      borderRadius: 2,
+                      bgcolor: 'background.default',
+                      borderLeft: '4px solid',
+                      borderColor: 'primary.main'
+                    }}
+                  >
+                    <Typography variant="subtitle1" fontWeight="medium" color="primary" sx={{ mb: 1 }}>
+                      Would you like to try brown noise to help you focus?  
+                    </Typography>
+                    <Typography variant="body2" sx={{ mb: 2 }}>
+                      Brown noise is a type of sound that can improve concentration by masking distracting background noises. Many students find it helpful for studying.
+                    </Typography>
+                    <Box sx={{ display: 'flex', gap: 1 }}>
+                      <Button 
+                        variant="contained" 
+                        onClick={() => handleBrownNoiseResponse('yes')} 
+                        color="primary"
+                        size="small"
+                      >
+                        Yes, play brown noise
+                      </Button>
+                      <Button 
+                        variant="outlined" 
+                        onClick={() => handleBrownNoiseResponse('no')} 
+                        color="secondary"
+                        size="small"
+                      >
+                        No, thanks
+                      </Button>
+                    </Box>
+                    <Typography 
+                      variant="caption" 
+                      sx={{ 
+                        display: 'block',
+                        mt: 1,
+                        opacity: 0.7,
+                        textAlign: 'left'
+                      }}
+                    >
+                      {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </Typography>
+                  </Card>
+                </Box>
+              </ListItem>
+            )}
+            
+            {/* Brown noise player - integrated into chat flow */}
+            {showBrownNoisePlayer && (
+              <ListItem 
+                sx={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  width: '100%',
+                  padding: 1,
+                  mb: 2
+                }}
+              >
+                <BrownNoisePlayerInline onStop={handleStopBrownNoise} />
+              </ListItem>
+            )}
+            
+            <Box ref={chatEndRef} />
+          </React.Fragment>
+        )}
+      </Box>
+      
+      <Divider />
+      
+      <Box 
+        sx={{ 
+          p: 2, 
+          display: 'flex',
+          alignItems: 'center'
+        }}
+      >
+        
+        <TextField
+          fullWidth
+          variant="outlined"
+          placeholder={isListening ? partialTranscript || 'Listening...' : 'Ask me anything about your studies...'}
+          value={isListening ? partialTranscript : message}
+          onChange={(e) => setMessage(e.target.value)}
+          onKeyPress={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              handleSendMessage();
+            }
+          }}
+          disabled={loading || isListening}
+          sx={{
+            '& .MuiOutlinedInput-root': {
+              borderRadius: '30px',
+              backgroundColor: isListening ? 'rgba(244, 67, 54, 0.1)' : 'background.paper',
+              pr: 0.5,
+            }
+          }}
+          InputProps={{
+            endAdornment: null
+          }}
+          helperText={loading ? 'Sending...' : isListening ? 'Say something...' : ''}
+        />
+        <Box display="flex" gap={1}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            {/* Send message button */}
+            <Tooltip title="Send message">
+              <span>
+                <IconButton 
+                  color="primary" 
+                  onClick={() => handleSendMessage()}
+                  disabled={(!message.trim() && !isListening) || loading}
+                  sx={{ 
+                    bgcolor: 'primary.main',
+                    color: 'white',
+                    '&:hover': {
+                      bgcolor: 'primary.dark',
+                    },
+                    '&.Mui-disabled': {
+                      bgcolor: 'action.disabledBackground',
+                    }
+                  }}
+                >
+                  <SendIcon />
+                </IconButton>
+              </span>
+            </Tooltip>
+            
+            {/* Voice input toggle button */}
+            {speechSupported && (
+              <Tooltip title={isListening ? "Stop listening" : "Start voice input"}>
+                <span>
+                  <IconButton 
+                    color={isListening ? "error" : "primary"}
+                    onClick={toggleVoiceInput}
+                    disabled={loading}
+                    sx={{ 
+                      bgcolor: isListening ? 'rgba(244, 67, 54, 0.12)' : 'background.paper',
+                      color: isListening ? 'error.main' : 'primary.main',
+                      border: '1px solid',
+                      borderColor: isListening ? 'error.main' : 'primary.light',
+                      '&:hover': {
+                        bgcolor: isListening ? 'rgba(244, 67, 54, 0.08)' : 'rgba(25, 118, 210, 0.04)',
+                      }
+                    }}
+                  >
+                    {isListening ? <MicIcon /> : <MicOffIcon />}
+                  </IconButton>
+                </span>
+              </Tooltip>
+            )}
+            
+            {/* Voice output toggle button */}
+            <Tooltip title={voiceEnabled ? "Turn off voice output" : "Turn on voice output"}>
+              <span>
+                <IconButton 
+                  color={voiceEnabled ? "primary" : "default"}
+                  onClick={toggleVoiceOutput}
+                  sx={{ 
+                    bgcolor: 'background.paper',
+                    border: '1px solid',
+                    borderColor: voiceEnabled ? 'primary.light' : 'grey.400',
+                    '&:hover': {
+                      bgcolor: 'rgba(0, 0, 0, 0.04)',
+                    }
+                  }}
+                >
+                  {voiceEnabled ? <VolumeUpIcon /> : <VolumeOffIcon />}
+                </IconButton>
+              </span>
+            </Tooltip>
+            
+            {/* Stop speech button - only shown when speaking */}
+            {isSpeaking && (
+              <Tooltip title="Stop speaking">
+                <span>
+                  <IconButton 
+                    color="error"
+                    onClick={stopSpeech}
+                    size="small"
+                    sx={{ 
+                      bgcolor: 'rgba(244, 67, 54, 0.12)',
+                      border: '1px solid',
+                      borderColor: 'error.main',
+                      '&:hover': {
+                        bgcolor: 'rgba(244, 67, 54, 0.08)',
+                      }
+                    }}
+                  >
+                    <StopIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            )}
+          </Box>
+        </Box>
+      </Box>
+    </Paper>
+  );
+};
+
+// Brown noise player component implemented directly in AIChatbot.js
+// to avoid chunk loading errors
+const BrownNoisePlayerInline = ({ onStop }) => {
+  const theme = useTheme();
+  const [volume, setVolume] = useState(50);
+  const [isMuted, setIsMuted] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(true);
+  const audioRef = useRef(null);
+  
+  // Create audio context and nodes when component mounts
+  useEffect(() => {
+    // Create an AudioContext
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    const audioContext = new AudioContext();
+    
+    // Create a buffer source node
+    const bufferSize = 10 * audioContext.sampleRate;
+    const brownNoiseBuffer = audioContext.createBuffer(1, bufferSize, audioContext.sampleRate);
+    const output = brownNoiseBuffer.getChannelData(0);
+    
+    // Generate brown noise
+    let lastOut = 0;
+    for (let i = 0; i < bufferSize; i++) {
+      // Generate white noise
+      const white = Math.random() * 2 - 1;
+      
+      // Apply brown noise filter
+      output[i] = (lastOut + (0.02 * white)) / 1.02;
+      lastOut = output[i];
+      output[i] *= 3.5; // Adjust volume
+    }
+    
+    // Create a source node
+    const brownNoiseSource = audioContext.createBufferSource();
+    brownNoiseSource.buffer = brownNoiseBuffer;
+    brownNoiseSource.loop = true;
+    
+    // Create a gain node for volume control
+    const gainNode = audioContext.createGain();
+    gainNode.gain.value = volume / 100;
+    
+    // Connect the nodes
+    brownNoiseSource.connect(gainNode);
+    gainNode.connect(audioContext.destination);
+    
+    // Start playing
+    brownNoiseSource.start(0);
+    
+    // Assign to ref for later access
+    audioRef.current = {
+      audioContext,
+      brownNoiseSource,
+      gainNode
+    };
+    
+    // Cleanup function
+    return () => {
+      if (audioRef.current) {
+        try {
+          if (audioRef.current.brownNoiseSource && 
+              audioRef.current.brownNoiseSource.context && 
+              audioRef.current.brownNoiseSource.context.state !== 'closed') {
+            audioRef.current.brownNoiseSource.stop();
+          }
+          
+          if (audioRef.current.audioContext && 
+              audioRef.current.audioContext.state !== 'closed') {
+            audioRef.current.audioContext.close();
+          }
+        } catch (err) {
+          console.error('Error cleaning up audio context:', err);
+        }
+      }
+    };
+  }, []);
+  
+  // Update volume when it changes
+  useEffect(() => {
+    if (audioRef.current && audioRef.current.gainNode) {
+      audioRef.current.gainNode.gain.value = isMuted ? 0 : volume / 100;
+    }
+  }, [volume, isMuted]);
+  
+  // Handle volume change
+  const handleVolumeChange = (event, newValue) => {
+    setVolume(newValue);
+    if (newValue > 0 && isMuted) {
+      setIsMuted(false);
+    }
+  };
+  
+  // Handle mute toggle
+  const handleMuteToggle = () => {
+    setIsMuted(!isMuted);
+  };
+  
+  // Handle stop button click
+  const handleStop = () => {
+    setIsPlaying(false);
+    
+    // Stop the audio
+    if (audioRef.current) {
+      try {
+        // Check if source and context exist and are not already closed
+        if (audioRef.current.brownNoiseSource && 
+            audioRef.current.brownNoiseSource.context && 
+            audioRef.current.brownNoiseSource.context.state !== 'closed') {
+          audioRef.current.brownNoiseSource.stop();
+        }
+        
+        if (audioRef.current.audioContext && 
+            audioRef.current.audioContext.state !== 'closed') {
+          audioRef.current.audioContext.close();
+        }
+      } catch (err) {
+        console.error('Error stopping brown noise:', err);
+      }
+    }
+    
+    // Call the onStop callback
+    if (onStop) {
+      onStop();
+    }
+  };
+  
+  // Determine which volume icon to show
+  const getVolumeIcon = () => {
+    if (isMuted || volume === 0) {
+      return <VolumeMuteIcon />;
+    } else if (volume < 50) {
+      return <VolumeDownIcon />;
+    } else {
+      return <VolumeUpIcon />;
+    }
+  };
+  
+  if (!isPlaying) {
+    return null;
+  }
+  
+  return (
+    <Card 
+      variant="outlined" 
+      sx={{ 
+        mb: 2, 
+        borderRadius: 2,
+        backgroundColor: theme.palette.background.default,
+        boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+        width: '100%',
+        maxWidth: '500px'
+      }}
+    >
+      <CardContent>
+        <Typography variant="subtitle1" fontWeight="medium" color="primary" sx={{ mb: 1 }}>
+          Brown Noise Player
+        </Typography>
+        
+        <Typography variant="body2" sx={{ mb: 2 }}>
+          Brown noise can help mask distracting sounds and improve focus. Adjust the volume to a comfortable level.
+        </Typography>
+        
+        <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
+          <IconButton 
+            onClick={handleMuteToggle}
+            size="small"
+            color={isMuted ? "default" : "primary"}
+          >
+            {getVolumeIcon()}
+          </IconButton>
+          
+          <Slider
+            value={volume}
+            onChange={handleVolumeChange}
+            aria-labelledby="brown-noise-volume-slider"
+            sx={{ 
+              mx: 2,
+              color: theme.palette.primary.main
+            }}
+            disabled={!isPlaying}
+          />
+          
+          <Tooltip title="Stop brown noise">
+            <IconButton 
+              onClick={handleStop}
+              size="small"
+              color="error"
+              aria-label="stop brown noise"
+            >
+              <StopIcon />
+            </IconButton>
+          </Tooltip>
+        </Box>
+        
+        <Typography 
+          variant="caption" 
+          color="text.secondary"
+          sx={{ display: 'block', textAlign: 'center', mt: 1 }}
+        >
+          Brown noise is playing at {isMuted ? 'muted' : `${volume}%`} volume
+        </Typography>
+      </CardContent>
+    </Card>
+  );
+};
+
+// Memoize the component to prevent unnecessary re-renders
+export default memo(AIChatbot);

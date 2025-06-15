@@ -1,0 +1,41 @@
+// Content analysis
+const analyzeContent = async () => {
+  if (!uploadedFile) {
+    setError('Please upload a file first');
+    return;
+  }
+  
+  try {
+    setLoading(true);
+    setIsAnalyzing(true);
+    setError(null);
+    
+    // Dispatch a custom event to notify AIChatbot that a file was uploaded
+    window.dispatchEvent(new CustomEvent('eduzen:fileUploaded', {
+      detail: {
+        fileType: uploadType,
+        fileName: uploadedFile.name
+      }
+    }));
+    
+    // Dispatch a custom event to notify AIChatbot that content analysis has started
+    window.dispatchEvent(new CustomEvent('eduzen:analyzeContent', {
+      detail: {
+        fileType: uploadType,
+        fileName: uploadedFile.name
+      }
+    }));
+    
+    // Get download URL from Firebase Storage
+    let downloadUrl = '';
+    try {
+      setStatusMessage('Uploading to secure storage...');
+      const storageRef = ref(storage, `study_materials/${Date.now()}_${uploadedFile.name}`);
+      const snapshot = await uploadBytes(storageRef, uploadedFile);
+      downloadUrl = await getDownloadURL(snapshot.ref);
+      console.log('Uploaded file to Firebase Storage:', snapshot);
+      console.log('Download URL:', downloadUrl);
+    } catch (error) {
+      console.error('Error uploading to Firebase Storage:', error);
+      // Continue with local file handling if Firebase upload fails
+    }
